@@ -77,6 +77,9 @@ static inline struct nv_drm_connector *to_nv_connector(
     return container_of(connector, struct nv_drm_connector, base);
 }
 
+/* Initial value of the "max bpc" property: let the driver choose. */
+#define NV_DRM_MAX_BPC_DEFAULT 12
+
 struct nv_drm_connector_state {
        struct drm_connector_state base;
        enum nv_drm_dithering_mode dithering_mode;

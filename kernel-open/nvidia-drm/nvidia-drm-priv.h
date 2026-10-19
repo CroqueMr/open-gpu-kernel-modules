@@ -198,6 +198,7 @@ struct nv_drm_device {
     struct drm_property *nv_crtc_color_passthrough_property;
 
     struct drm_property *nv_connector_dithering_mode_property;
+    struct drm_property *nv_connector_max_bpc_property;
 
     struct drm_property *nv_connector_hdmi_vsif_metadata_property;
 

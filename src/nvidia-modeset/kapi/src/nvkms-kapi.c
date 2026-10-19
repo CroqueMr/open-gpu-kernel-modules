@@ -3461,6 +3461,12 @@ static NvBool NvKmsKapiRequestedModeSetConfigToKms(
         paramsHead->flip.postcompColorPassthrough.specified = TRUE;
         paramsHead->flip.postcompColorPassthrough.enabled =
             headModeSetConfig->postcompColorPassthrough;
+
+        if (headModeSetConfig->colorBpc != 0) {
+            paramsHead->colorBpcSpecified = NV_TRUE;
+            paramsHead->colorBpc =
+                (enum NvKmsDpyAttributeColorBpcValue)headModeSetConfig->colorBpc;
+        }
     }
 
     return NV_TRUE;
@@ -3809,7 +3815,8 @@ static NvBool ApplyModeSetConfig(
         bRequiredModeset =
             headRequestedConfig->flags.activeChanged       ||
             headRequestedConfig->flags.displaysChanged     ||
-            headRequestedConfig->flags.modeChanged;
+            headRequestedConfig->flags.modeChanged         ||
+            headRequestedConfig->flags.colorBpcChanged;
 
         if (!device->caps.supportsFlipSynchronizedInfoframes) {
             bRequiredModeset |=

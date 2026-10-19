@@ -420,6 +420,14 @@ struct NvKmsKapiHeadModeSetConfig {
     } dithering;
 
     NvBool postcompColorPassthrough;
+
+    /*
+     * Output color depth in bits per component. 0 lets NVKMS choose it;
+     * any other value (from enum NvKmsDpyAttributeColorBpcValue) drives the
+     * head at exactly that depth. nvidia-drm sets it from the "max bpc"
+     * connector property.
+     */
+    NvU32 colorBpc;
 };
 
 struct NvKmsKapiHeadRequestedConfig {
@@ -435,6 +443,7 @@ struct NvKmsKapiHeadRequestedConfig {
         NvBool ditheringChanged                : 1;
         NvBool hdmiVsifMetadataChanged         : 1;
         NvBool postcompColorPassthroughChanged : 1;
+        NvBool colorBpcChanged                 : 1;
     } flags;
 
     struct NvKmsKapiCursorRequestedConfig cursorRequestedConfig;

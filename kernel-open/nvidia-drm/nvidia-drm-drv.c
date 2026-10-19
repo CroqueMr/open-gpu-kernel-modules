@@ -672,6 +672,19 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
         return -ENOMEM;
     }
 
+    /*
+     * Standard "max bpc" connector property, attached to HDMI connectors.
+     * Values below 10 drive the head at 8 bpc; 10 and above keep the
+     * driver's choice (at most nvidia-modeset.max_output_color_depth).
+     */
+    nv_dev->nv_connector_max_bpc_property =
+        drm_property_create_range(nv_dev->dev, 0, "max bpc",
+                                  8, NV_DRM_MAX_BPC_DEFAULT);
+    if (nv_dev->nv_connector_max_bpc_property == NULL) {
+        NV_DRM_LOG_ERR("Failed to create max bpc property");
+        return -ENOMEM;
+    }
+
     // Color Pipeline Passthrough Properties
     nv_dev->nv_plane_color_passthrough_property =
         drm_property_create_bool(nv_dev->dev, 0,
