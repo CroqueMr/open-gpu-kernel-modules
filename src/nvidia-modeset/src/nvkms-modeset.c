@@ -4096,6 +4096,32 @@ NvBool nvSetDispModeEvoWithVsif(NVDevEvoPtr pDevEvo,
         goto done;
     }
 
+    /* Validate typed metadata against the final bandwidth-selected mode. */
+    if (pDevEvo->cb1Hdr10plusIntent) {
+        NvU32 sd, apiHead;
+        FOR_ALL_EVO_DISPLAYS(pDispEvo, sd, pDevEvo) {
+            for (apiHead = 0; apiHead < pDevEvo->numApiHeads; apiHead++) {
+                const struct NvKmsCb1Hdr10plus *intent =
+                    &pDevEvo->cb1Hdr10plusIntent[sd][apiHead];
+                const NVProposedModeSetStateOneApiHead *proposed =
+                    &pProposed->disp[sd].apiHead[apiHead];
+                if (nvCb1NeedsDeepRoute(intent) &&
+                    (!nvCb1Hdr10plusRoute(pDispEvo, apiHead, proposed->dpyIdList,
+                        &proposed->attributes.color, &proposed->infoFrame,
+                        &proposed->hdmiVsifMetadata, FALSE) ||
+                     proposed->hwHeadsMask == 0 ||
+                     nvPopCount32(proposed->hwHeadsMask) != 1 ||
+                     nvEvoDpyColorToPixelDepth(&proposed->attributes.color) !=
+                        NVKMS_PIXEL_DEPTH_20_422 ||
+                     !pRequest->disp[sd].head[apiHead].flip.hdrInfoFrame.enabled ||
+                     pRequest->disp[sd].head[apiHead].flip.hdrInfoFrame.eotf !=
+                        NVKMS_INFOFRAME_EOTF_ST2084)) {
+                    goto done;
+                }
+            }
+        }
+    }
+
     /* The requested configuration is valid. */
 
     ret = TRUE;
@@ -4112,6 +4138,18 @@ NvBool nvSetDispModeEvoWithVsif(NVDevEvoPtr pDevEvo,
     }
 
     /* From this point, we should not fail. */
+    {
+        const struct NvKmsCb1Hdr10plus clear = { .specified = TRUE };
+        NvU32 sd, apiHead, head;
+        FOR_ALL_EVO_DISPLAYS(pDispEvo, sd, pDevEvo) {
+            for (apiHead = 0; apiHead < pDevEvo->numApiHeads; apiHead++) {
+                if (!(pRequest->disp[sd].requestedHeadsBitMask & (1U << apiHead))) continue;
+                FOR_EACH_EVO_HW_HEAD_IN_MASK(pDispEvo->apiHeadState[apiHead].hwHeadsMask, head) {
+                    nvCb1CommitHdr10plus(pDispEvo, head, &clear, TRUE);
+                }
+            }
+        }
+    }
 
     /*
      * Disable stereo pin during console restore or modeset owner changes.
@@ -4181,6 +4219,20 @@ NvBool nvSetDispModeEvoWithVsif(NVDevEvoPtr pDevEvo,
 
     BeginEndModeset(pDevEvo, pProposed, END_MODESET);
 
+    if (pDevEvo->cb1Hdr10plusIntent) {
+        NvU32 sd, apiHead;
+        FOR_ALL_EVO_DISPLAYS(pDispEvo, sd, pDevEvo) {
+            for (apiHead = 0; apiHead < pDevEvo->numApiHeads; apiHead++) {
+                /* Clears already ran before native slot reassignment. */
+                if (nvApiHeadIsActive(pDispEvo, apiHead) &&
+                    pDevEvo->cb1Hdr10plusIntent[sd][apiHead].enabled) {
+                    NvU32 head = nvGetPrimaryHwHead(pDispEvo, apiHead);
+                    nvCb1CommitHdr10plus(pDispEvo, head,
+                        &pDevEvo->cb1Hdr10plusIntent[sd][apiHead], TRUE);
+                }
+            }
+        }
+    }
     AssignReplySuccess(pDevEvo, pRequest, pReply, pWorkArea);
 
     pDevEvo->skipConsoleRestore = FALSE;
