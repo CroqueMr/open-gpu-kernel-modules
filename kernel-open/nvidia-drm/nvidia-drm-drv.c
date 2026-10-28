@@ -644,6 +644,17 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
         return -ENOMEM;
     }
 
+    {
+        static const struct drm_prop_enum_list dither[] = {{0, "auto"}, {1, "off"}};
+        nv_dev->cb1_vsif_property = drm_property_create(nv_dev->dev,
+            DRM_MODE_PROP_BLOB, "NV_HDMI_VSIF_METADATA", 0);
+        nv_dev->cb1_bpc_property = drm_property_create_range(nv_dev->dev,
+            0, "max bpc", 8, 12);
+        nv_dev->cb1_dither_property = drm_property_create_enum(nv_dev->dev,
+            0, "dithering mode", dither, ARRAY_SIZE(dither));
+        if (!nv_dev->cb1_vsif_property || !nv_dev->cb1_bpc_property ||
+            !nv_dev->cb1_dither_property) return -ENOMEM;
+    }
     return 0;
 }
 

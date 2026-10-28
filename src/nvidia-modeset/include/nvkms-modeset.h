@@ -52,6 +52,14 @@ NvBool nvSetDispModeEvo(NVDevEvoPtr pDevEvo,
                         NvBool bypassComposition,
                         NvBool doRasterLock);
 
+NvBool nvSetDispModeEvoWithVsif(NVDevEvoPtr pDevEvo,
+                        struct NvKmsPerOpenDev *pOpenDev,
+                        const struct NvKmsSetModeRequest *pRequest,
+                        struct NvKmsSetModeReply *pReply,
+                        NvBool bypassComposition,
+                        NvBool doRasterLock,
+                        const struct NvKmsCb1Vsif (*vsif)[NVKMS_MAX_HEADS_PER_DISP]);
+
 typedef NvBool (*NVShutDownApiHeadsTestFunc)(
     const NVDispEvoRec *pDispEvo,
     const NvU32 apiHead,
