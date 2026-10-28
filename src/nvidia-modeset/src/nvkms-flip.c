@@ -33,6 +33,7 @@
 #include "nvkms-vrr.h"
 #include "nvkms-dpy.h"
 #include "nvkms-rm.h"
+#include "nvkms-hdmi.h"
 
 /*!
  * Check whether the permissions for pOpenDev allow changing the
@@ -692,6 +693,29 @@ NvBool nvFlipEvo(NVDevEvoPtr pDevEvo,
         }
     }
 
+    if (pDevEvo->cb1Hdr10plusIntent) {
+        FOR_ALL_EVO_DISPLAYS(pDispEvo, sd, pDevEvo) {
+            for (apiHead = 0; apiHead < pDevEvo->numApiHeads; apiHead++) {
+                const struct NvKmsCb1Hdr10plus *intent =
+                    &pDevEvo->cb1Hdr10plusIntent[sd][apiHead];
+                const NVDispApiHeadStateEvoRec *active = &pDispEvo->apiHeadState[apiHead];
+                const NVProposedFlipStateOneApiHead *proposed =
+                    &pWorkArea->disp[sd].apiHead[apiHead].proposedFlipState;
+                NvU32 head;
+                if (!nvCb1NeedsDeepRoute(intent)) continue;
+                if (nvPopCount32(active->hwHeadsMask) != 1 ||
+                    !nvCb1Hdr10plusRoute(pDispEvo, apiHead, active->activeDpys,
+                        &proposed->hdr.dpyColor, &active->infoFrame,
+                        &active->hdmiVsifMetadata, active->vrr.active)) goto done;
+                head = nvGetPrimaryHwHead(pDispEvo, apiHead);
+                if (pDispEvo->headState[head].hdrInfoFrame.state !=
+                        NVKMS_HDR_INFOFRAME_STATE_ENABLED ||
+                    pDispEvo->headState[head].hdrInfoFrame.eotf != NVKMS_INFOFRAME_EOTF_ST2084 ||
+                    pDispEvo->headState[head].pixelDepth != NVKMS_PIXEL_DEPTH_20_422) goto done;
+            }
+        }
+    }
+
     if (!commit) {
         ret = NV_TRUE;
         result = NV_KMS_FLIP_RESULT_SUCCESS;
@@ -751,6 +775,16 @@ NvBool nvFlipEvo(NVDevEvoPtr pDevEvo,
         }
     }
 
+    if (pDevEvo->cb1Hdr10plusIntent) {
+        FOR_ALL_EVO_DISPLAYS(pDispEvo, sd, pDevEvo) {
+            for (apiHead = 0; apiHead < pDevEvo->numApiHeads; apiHead++) {
+                if (nvApiHeadIsActive(pDispEvo, apiHead)) {
+                    nvCb1CommitHdr10plus(pDispEvo, nvGetPrimaryHwHead(pDispEvo, apiHead),
+                        &pDevEvo->cb1Hdr10plusIntent[sd][apiHead], TRUE);
+                }
+            }
+        }
+    }
     nvPostFlip(pDevEvo, pWorkArea, skipUpdate, applyAllowVrrApiHeadMasks,
                &vrrSemaphoreIndex);
 
