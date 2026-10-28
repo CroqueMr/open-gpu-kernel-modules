@@ -46,6 +46,7 @@
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_sysfs.h>
+#include <drm/drm_hdr10plus.h>
 
 /*
  * Dithering support requires connector atomic_check, which we only enable on
@@ -337,6 +338,7 @@ static struct drm_connector_state* nv_drm_connector_atomic_duplicate_state(struc
     __drm_atomic_helper_connector_duplicate_state(connector, &nv_drm_new_connector_state->base);
 
     nv_drm_new_connector_state->dithering_mode = nv_drm_old_connector_state->dithering_mode;
+    nv_drm_new_connector_state->cb1_deep_color = nv_drm_old_connector_state->cb1_deep_color;
     nv_drm_new_connector_state->hdcp_topology_blob = nv_drm_old_connector_state->hdcp_topology_blob;
     if (nv_drm_new_connector_state->hdcp_topology_blob) {
         drm_property_blob_get(nv_drm_new_connector_state->hdcp_topology_blob);
@@ -387,6 +389,15 @@ static int nv_drm_connector_atomic_set_property(
     struct nv_drm_connector_state *nv_connector_state =
         to_nv_drm_connector_state(state);
 
+    if (property == nv_dev->cb1_deep_color_property) {
+        if (val > 1) return -EINVAL;
+        nv_connector_state->cb1_deep_color = val;
+        return 0;
+    }
+    if (property == nv_dev->cb1_output_bpc_property ||
+        property == nv_dev->cb1_hdr10plus_status_property) {
+        return -EINVAL;
+    }
     if (property == nv_dev->nv_connector_dithering_mode_property) {
         if (val >= NV_DRM_DITHERING_MODE_MAX) {
             return -EINVAL;
@@ -412,6 +423,20 @@ static int nv_drm_connector_atomic_set_property(
     return -EINVAL;
 }
 
+/* Logical read-only property: IMMUTABLE would bypass this live getter. */
+static NvU32 nv_drm_connector_current_output_bpc(
+    struct drm_connector *connector, const struct drm_connector_state *state)
+{
+    struct nv_drm_device *nv_dev = to_nv_device(connector->dev);
+    if (connector->status != connector_status_connected ||
+        !state->crtc || !state->best_encoder || !state->crtc->state->active) {
+        return 0;
+    }
+    return nvKms->getCurrentOutputBpc(nv_dev->pDevice,
+        to_nv_encoder(state->best_encoder)->hDisplay,
+        to_nv_crtc(state->crtc)->head);
+}
+
 static int nv_drm_connector_atomic_get_property(
     struct drm_connector *connector,
     const struct drm_connector_state *state,
@@ -422,6 +447,31 @@ static int nv_drm_connector_atomic_get_property(
     struct nv_drm_connector *nv_conn = to_nv_connector(connector);    
     const struct nv_drm_connector_state *nv_connector_state =
         to_nv_drm_connector_state_const(state);
+
+    if (property == nv_dev->cb1_deep_color_property) {
+        *val = nv_connector_state->cb1_deep_color;
+        return 0;
+    }
+    if (property == nv_dev->cb1_hdr10plus_status_property) {
+        NvU32 status = 0;
+        if (state->crtc && to_nv_crtc_state(state->crtc->state)->cb1_commit_fault) {
+            *val = 2;
+            return 0;
+        }
+        if (connector->status == connector_status_connected && state->crtc &&
+            state->best_encoder && state->crtc->state->active) {
+            nvKms->getHdr10PlusState(nv_dev->pDevice,
+                to_nv_encoder(state->best_encoder)->hDisplay,
+                to_nv_crtc(state->crtc)->head, &status);
+        }
+        *val = status;
+        return 0;
+    }
+
+    if (property == nv_dev->cb1_output_bpc_property) {
+        *val = nv_drm_connector_current_output_bpc(connector, state);
+        return 0;
+    }
 
     if (property == nv_dev->nv_connector_dithering_mode_property) {
         *val = nv_connector_state->dithering_mode;
@@ -620,6 +670,36 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
     nv_crtc_state = to_nv_crtc_state(crtc_state);
     req_config = &nv_crtc_state->req_config;
 
+    {
+        const bool active = new_connector_state->hdr10plus_metadata != NULL;
+        const bool deep = nv_new_connector_state->cb1_deep_color;
+        struct NvKmsCb1Hdr *hdr = &req_config->modeSetConfig.cb1Hdr;
+        if (active) {
+            struct drm_plane_state *primary =
+                drm_atomic_get_new_plane_state(state, crtc->primary);
+            if (drm_connector_check_hdr10plus(new_connector_state) ||
+                !drm_hdr10plus_infoframe_valid(new_connector_state->hdr10plus_metadata->data,
+                    new_connector_state->hdr10plus_metadata->length) ||
+                !crtc_state->active || !primary || !primary->fb || primary->crtc != crtc ||
+                !nv_crtc_state->cb1_primary_submitted ||
+                to_nv_crtc_state(crtc->state)->cb1_commit_fault ||
+                state->async_update || crtc_state->async_flip ||
+                nv_new_connector_state->hdmi_vsif_metadata ||
+                (crtc_state->adjusted_mode.flags & DRM_MODE_FLAG_3D_MASK)) return -EINVAL;
+            memcpy(hdr->packet, new_connector_state->hdr10plus_metadata->data, 31);
+        }
+        if (deep || active) {
+            if (!new_connector_state->hdr_output_metadata ||
+                new_connector_state->hdr_output_metadata->length != sizeof(struct hdr_output_metadata) ||
+                new_connector_state->max_requested_bpc < 10 ||
+                (new_connector_state->colorspace != DRM_MODE_COLORIMETRY_BT2020_RGB &&
+                 new_connector_state->colorspace != DRM_MODE_COLORIMETRY_BT2020_YCC)) return -EINVAL;
+        }
+        hdr->specified = NV_TRUE;
+        hdr->enabled = active;
+        hdr->deepColor = deep;
+    }
+
     /* Handle dithering changes */
     req_config->flags.ditheringChanged =
         nv_old_connector_state->dithering_mode !=
@@ -642,9 +722,14 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
      * this head; a change needs a modeset.
      */
     {
-        const NvU32 bpc = nv_drm_connector_requested_bpc(new_connector_state);
+        const NvU32 bpc = (req_config->modeSetConfig.cb1Hdr.enabled ||
+            req_config->modeSetConfig.cb1Hdr.deepColor) ?
+            (new_connector_state->max_requested_bpc >= 12 ? 12 : 10) :
+            nv_drm_connector_requested_bpc(new_connector_state);
 
-        if (req_config->modeSetConfig.colorBpc != bpc) {
+        if (req_config->modeSetConfig.colorBpc != bpc ||
+            nv_new_connector_state->cb1_deep_color != nv_old_connector_state->cb1_deep_color ||
+            (!!new_connector_state->hdr10plus_metadata != !!old_connector_state->hdr10plus_metadata)) {
             req_config->modeSetConfig.colorBpc = bpc;
             req_config->flags.colorBpcChanged = NV_TRUE;
         }
@@ -852,6 +937,15 @@ nv_drm_connector_new(struct drm_device *dev,
 
 #if defined(NV_DRM_CONNECTOR_ATTACH_HDR_OUTPUT_METADATA_PROPERTY_PRESENT)
     if (nv_connector->type == NVKMS_CONNECTOR_TYPE_HDMI) {
+        drm_object_attach_property(&nv_connector->base.base,
+                                   nv_dev->cb1_output_bpc_property, 0);
+        drm_object_attach_property(&nv_connector->base.base,
+                                   nv_dev->cb1_deep_color_property, 0);
+        if (nvKms->getHdr10PlusState(nv_dev->pDevice, 0, 0, NULL)) {
+            drm_connector_attach_hdr10plus_metadata_property(&nv_connector->base);
+            drm_object_attach_property(&nv_connector->base.base,
+                                       nv_dev->cb1_hdr10plus_status_property, 0);
+        }
 #if defined(NV_DRM_MODE_CREATE_DP_COLORSPACE_PROPERTY_HAS_SUPPORTED_COLORSPACES_ARG)
         if (drm_mode_create_hdmi_colorspace_property(
                 &nv_connector->base,
@@ -869,6 +963,10 @@ nv_drm_connector_new(struct drm_device *dev,
                                        0);
         }
     } else if (nv_connector->type == NVKMS_CONNECTOR_TYPE_DP) {
+        drm_object_attach_property(&nv_connector->base.base,
+                                   nv_dev->cb1_output_bpc_property, 0);
+        drm_object_attach_property(&nv_connector->base.base,
+                                   nv_dev->cb1_deep_color_property, 0);
 #if defined(NV_DRM_MODE_CREATE_DP_COLORSPACE_PROPERTY_HAS_SUPPORTED_COLORSPACES_ARG)
         if (drm_mode_create_dp_colorspace_property(
                 &nv_connector->base,

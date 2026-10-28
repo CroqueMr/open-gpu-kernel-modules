@@ -1059,6 +1059,14 @@ AssignProposedModeSetHwState(NVDevEvoRec *pDevEvo,
 
             pProposedApiHead->changed = TRUE;
             pProposedApiHead->dpyIdList = pRequestHead->dpyIdList;
+            {
+                const struct NvKmsCb1Hdr *intent = nvGetCb1HdrIntent(pOpenDev, sd, apiHead);
+                nvkms_memset(&pProposedApiHead->cb1Hdr, 0, sizeof(pProposedApiHead->cb1Hdr));
+                if (intent) pProposedApiHead->cb1Hdr = *intent;
+                pProposedApiHead->cb1Hdr.specified = NV_TRUE;
+                pProposedApiHead->cb1Primary = pRequestHead->flip.layer[NVKMS_MAIN_LAYER].surface.specified &&
+                    pRequestHead->flip.layer[NVKMS_MAIN_LAYER].surface.handle[0] != 0;
+            }
             pProposedApiHead->activeRmId =
                 nvRmAllocDisplayId(pDispEvo, pProposedApiHead->dpyIdList);
             if (pProposedApiHead->activeRmId == 0x0) {
@@ -2138,13 +2146,13 @@ ValidateProposedModeSetHwStateOneDisp(
 static NvBool
 ValidateProposedFlipHwStateOneSubDev(
     const NVDevEvoRec *pDevEvo,
-    const NVProposedModeSetHwStateOneDisp *pProposedDisp,
+    NVProposedModeSetHwStateOneDisp *pProposedDisp,
     NVProposedModeSetHwStateOneSubDev *pProposedSd,
     struct NvKmsSetModeOneDispReply *pReplyDisp)
 {
     for (NvU32 apiHead = 0; apiHead < pDevEvo->numApiHeads; apiHead++) {
         NvU32 head;
-        const NVProposedModeSetStateOneApiHead *pProposedApiHead =
+        NVProposedModeSetStateOneApiHead *pProposedApiHead =
             &pProposedDisp->apiHead[apiHead];
 
         if (!pProposedApiHead->changed ||
@@ -2167,6 +2175,29 @@ ValidateProposedFlipHwStateOneSubDev(
                 pReplyDisp->head[apiHead].status =
                     NVKMS_SET_MODE_ONE_HEAD_STATUS_INVALID_FLIP;
                 return FALSE;
+            }
+            {
+                const NVDispEvoRec *disp = pDevEvo->pDispEvo[0];
+                const NVDpyEvoRec *dpy = nvGetOneArbitraryDpyEvo(pProposedApiHead->dpyIdList, disp);
+                NvU32 slot;
+                if (!nvCb1HdrVrrTransitionValid(disp, head,
+                        &pProposedDisp->head[head].timings, dpy && nvDpyIsHdmiEvo(dpy))) {
+                    pReplyDisp->head[apiHead].status = NVKMS_SET_MODE_ONE_HEAD_STATUS_INVALID_FLIP;
+                    return FALSE;
+                }
+                if ((pProposedApiHead->cb1Hdr.enabled &&
+                     (nvPopCount32(pProposedApiHead->hwHeadsMask) != 1 ||
+                      nvCountDpyIdsInDpyIdList(pProposedApiHead->dpyIdList) != 1 ||
+                      disp->headState[head].cb1HdrLedger.status == 2)) ||
+                    !nvCb1HdrValidate(dpy, &pProposedApiHead->attributes.color,
+                        &pProposedDisp->head[head].timings, &pProposedApiHead->infoFrame,
+                        &pProposedSd->head[head].flip, &pProposedApiHead->cb1Hdr,
+                        pProposedApiHead->cb1Primary, &slot)) {
+                    pReplyDisp->head[apiHead].status = NVKMS_SET_MODE_ONE_HEAD_STATUS_INVALID_FLIP;
+                    return FALSE;
+                }
+                /* Only the selected slot is retained; TEST_ONLY never programs it. */
+                pProposedApiHead->cb1Slot = slot;
             }
         }
     }
@@ -2582,6 +2613,11 @@ ApplyProposedModeSetHwStateOneHeadShutDown(
     NVDevEvoPtr pDevEvo = pDispEvo->pDevEvo;
     const NvU32 sd = pDispEvo->displayOwner;
     NVDispHeadStateEvoPtr pHeadState = &pDispEvo->headState[head];
+
+    {
+        const struct NvKmsCb1Hdr clear = {.specified = NV_TRUE};
+        nvCb1HdrApply(pDispEvo, head, &clear, 0);
+    }
 
     nvHdmiDpEnableDisableAudio(pDispEvo, head, FALSE /* enable */);
 
@@ -3319,6 +3355,10 @@ ApplyProposedModeSetStateOneApiHeadPostModesetUpdate(
     nvAssert(pDpyEvo != NULL);
 
     nvUpdateInfoFrames(pDpyEvo, flipSynchronizeInfoframes);
+
+    FOR_EACH_EVO_HW_HEAD_IN_MASK(pApiHeadState->hwHeadsMask, head) {
+        nvCb1HdrApply(pDispEvo, head, &pProposedApiHead->cb1Hdr, pProposedApiHead->cb1Slot);
+    }
 
     /* Perform 3D vision authentication */
     nv3DVisionAuthenticationEvo(pDispEvo, apiHead);

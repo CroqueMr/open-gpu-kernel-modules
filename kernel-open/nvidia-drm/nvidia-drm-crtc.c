@@ -2535,6 +2535,7 @@ nv_drm_atomic_crtc_duplicate_state(struct drm_crtc *crtc)
     }
 
     __drm_atomic_helper_crtc_duplicate_state(crtc, &nv_state->base);
+    nv_state->cb1_commit_fault = nv_old_state->cb1_commit_fault;
 
     nv_state->regamma_tf = nv_old_state->regamma_tf;
     nv_state->regamma_lut = nv_old_state->regamma_lut;

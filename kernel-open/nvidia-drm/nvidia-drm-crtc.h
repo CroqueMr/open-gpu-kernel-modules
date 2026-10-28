@@ -144,6 +144,9 @@ struct nv_drm_flip {
 };
 
 struct nv_drm_crtc_state {
+    /* Snapshot before atomic helpers inherit/expand the plane set. */
+    bool cb1_primary_submitted;
+    bool cb1_commit_fault;
     /**
      * @base:
      *

@@ -1680,6 +1680,9 @@ struct NvKmsKapiFunctionsTable {
         struct NvKmsKapiDevice *device,
         const NvU32 head,
         struct NvKmsKapiVblankIntrCallback *pCallback);
+    /* Kernel-client-only diagnostic; appended to preserve preceding offsets. */
+    NvU32 (*getCurrentOutputBpc)(struct NvKmsKapiDevice *device,
+                                NvKmsKapiDisplay display, NvU32 head);
 };
 
 /** @} */

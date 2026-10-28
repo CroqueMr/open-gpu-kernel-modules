@@ -27,6 +27,8 @@
 #include "nvkms-types.h"
 
 typedef struct {
+    struct NvKmsCb1Hdr cb1Hdr;
+    NvU32 cb1Slot;
     struct {
         enum NvKmsOutputTf tf;
         NVDpyAttributeColor dpyColor;

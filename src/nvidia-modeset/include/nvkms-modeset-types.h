@@ -29,6 +29,9 @@
 #include "nvkms-types.h"
 
 typedef struct {
+    struct NvKmsCb1Hdr cb1Hdr;
+    NvU32 cb1Slot;
+    NvBool cb1Primary;
     NvU32 hwHeadsMask;
     struct NvKmsModeValidationParams modeValidationParams;
     NVHwModeTimingsEvo timings;
