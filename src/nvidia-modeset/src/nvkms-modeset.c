@@ -504,6 +504,8 @@ InitNVProposedModeSetStateOneApiHead(
     pProposedApiHead->tf = pDispEvo->apiHeadState[apiHead].tf;
     pProposedApiHead->hdrInfoFrameOverride =
         pDispEvo->apiHeadState[apiHead].hdrInfoFrameOverride;
+    pProposedApiHead->hdmiVsifMetadata =
+        pDispEvo->apiHeadState[apiHead].hdmiVsifMetadata;
     pProposedApiHead->hdrStaticMetadataLayerMask =
         pDispEvo->apiHeadState[apiHead].hdrStaticMetadataLayerMask;
     pProposedApiHead->viewPortPointIn =
@@ -1047,7 +1049,8 @@ AssignProposedModeSetHwState(NVDevEvoRec *pDevEvo,
                              const struct NvKmsPerOpenDev *pOpenDev,
                              const struct NvKmsSetModeRequest *pRequest,
                              struct NvKmsSetModeReply *pReply,
-                             NVProposedModeSetHwState *pProposed)
+                             NVProposedModeSetHwState *pProposed,
+                             const struct NvKmsCb1Vsif (*vsif)[NVKMS_MAX_HEADS_PER_DISP])
 {
     NvU32 sd;
     NVDispEvoPtr pDispEvo;
@@ -1111,6 +1114,21 @@ AssignProposedModeSetHwState(NVDevEvoRec *pDevEvo,
 
             pProposedApiHead->changed = TRUE;
             pProposedApiHead->dpyIdList = pRequestHead->dpyIdList;
+            /* A normal userspace/console modeset clears the private override. */
+            nvkms_memset(&pProposedApiHead->hdmiVsifMetadata, 0,
+                         sizeof(pProposedApiHead->hdmiVsifMetadata));
+            if (vsif != NULL) {
+                if (!nvCb1VsifValid(&vsif[sd][apiHead]) ||
+                    (vsif[sd][apiHead].payloadSize != 0 &&
+                     (!nvDpyIsHdmiEvo(pDpyEvo) ||
+                      nvCountDpyIdsInDpyIdList(pRequestHead->dpyIdList) != 1))) {
+                    pReply->disp[sd].head[apiHead].status =
+                        NVKMS_SET_MODE_ONE_HEAD_STATUS_INVALID_MODE;
+                    ret = FALSE;
+                    continue;
+                }
+                pProposedApiHead->hdmiVsifMetadata = vsif[sd][apiHead];
+            }
             pProposedApiHead->activeRmId =
                 nvRmAllocDisplayId(pDispEvo, pProposedApiHead->dpyIdList);
             if (pProposedApiHead->activeRmId == 0x0) {
@@ -2160,6 +2178,13 @@ ValidateProposedModeSetHwStateOneDisp(
                              pProposedApiHead->attributes.color.colorimetry,
                              &pDpyEvo->requestedDithering,
                              &pProposedApiHead->attributes.dithering);
+        if (pProposedApiHead->hdmiVsifMetadata.disableDithering) {
+            pProposedApiHead->attributes.dithering.enabled = FALSE;
+            pProposedApiHead->attributes.dithering.mode =
+                NV_KMS_DPY_ATTRIBUTE_CURRENT_DITHERING_MODE_NONE;
+            pProposedApiHead->attributes.dithering.depth =
+                NV_KMS_DPY_ATTRIBUTE_CURRENT_DITHERING_DEPTH_NONE;
+        }
     }
 
     /*
@@ -2886,6 +2911,7 @@ ApplyProposedModeSetHwStateOneHeadPreUpdate(
     NVEvoUpdateState *updateState = &pModesetUpdateState->updateState;
 
     pHeadState->modeValidationParams = pProposedApiHead->modeValidationParams;
+    pHeadState->hdmiVsifMetadata = pProposedApiHead->hdmiVsifMetadata;
     pHeadState->bypassComposition = bypassComposition;
     pHeadState->activeRmId = pProposedApiHead->activeRmId;
     pHeadState->pConnectorEvo = pProposedHead->pConnectorEvo;
@@ -3082,6 +3108,7 @@ ApplyProposedModeSetStateOneApiHeadPreUpdate(
     pApiHeadState->tf = pProposedApiHead->tf;
     pApiHeadState->hdrInfoFrameOverride =
         pProposedApiHead->hdrInfoFrameOverride;
+    pApiHeadState->hdmiVsifMetadata = pProposedApiHead->hdmiVsifMetadata;
     pApiHeadState->hdrStaticMetadataLayerMask =
         pProposedApiHead->hdrStaticMetadataLayerMask;
     pApiHeadState->hs10bpcHint = pProposedApiHead->hs10bpcHint;
@@ -3920,7 +3947,8 @@ AssignAndValidateProposedModeSet(NVDevEvoPtr pDevEvo,
                                  const struct NvKmsSetModeRequest *pRequest,
                                  struct NvKmsSetModeReply *pReply,
                                  NVProposedModeSetHwState *pProposed,
-                                 NVModeSetWorkArea *pWorkArea)
+                                 NVModeSetWorkArea *pWorkArea,
+                                 const struct NvKmsCb1Vsif (*vsif)[NVKMS_MAX_HEADS_PER_DISP])
 {
     NvBool ret = FALSE;
     struct NvKmsSetModeRequest *pPatchedRequest = nvPreallocGet(pDevEvo,
@@ -3958,7 +3986,7 @@ tryHsAgain:
 
         /* assign pProposed from pPatchedRequest */
         if (!AssignProposedModeSetHwState(pDevEvo, pOpenDev, pPatchedRequest,
-                                          pReply, pProposed)) {
+                                          pReply, pProposed, vsif)) {
 
             nvHsConfigClearPatchedSetModeRequest(pDevEvo,
                                                  pOpenDev,
@@ -4026,12 +4054,13 @@ done:
  *                 the state of the hardware and software should not
  *                 have been changed.
  */
-NvBool nvSetDispModeEvo(NVDevEvoPtr pDevEvo,
+NvBool nvSetDispModeEvoWithVsif(NVDevEvoPtr pDevEvo,
                         struct NvKmsPerOpenDev *pOpenDev,
                         const struct NvKmsSetModeRequest *pRequest,
                         struct NvKmsSetModeReply *pReply,
                         NvBool bypassComposition,
-                        NvBool doRasterLock)
+                        NvBool doRasterLock,
+                        const struct NvKmsCb1Vsif (*vsif)[NVKMS_MAX_HEADS_PER_DISP])
 {
     NvBool ret = FALSE;
     NVProposedModeSetHwState *pProposed =
@@ -4063,7 +4092,7 @@ NvBool nvSetDispModeEvo(NVDevEvoPtr pDevEvo,
     }
 
     if (!AssignAndValidateProposedModeSet(pDevEvo, pOpenDev, pRequest, pReply,
-                                          pProposed, pWorkArea)) {
+                                          pProposed, pWorkArea, vsif)) {
         goto done;
     }
 
@@ -4202,6 +4231,17 @@ done:
     nvPreallocRelease(pDevEvo, PREALLOC_TYPE_MODE_SET_WORK_AREA);
     nvPreallocRelease(pDevEvo, PREALLOC_TYPE_PROPOSED_MODESET_HW_STATE);
     return ret;
+}
+
+NvBool nvSetDispModeEvo(NVDevEvoPtr pDevEvo,
+                        struct NvKmsPerOpenDev *pOpenDev,
+                        const struct NvKmsSetModeRequest *pRequest,
+                        struct NvKmsSetModeReply *pReply,
+                        NvBool bypassComposition,
+                        NvBool doRasterLock)
+{
+    return nvSetDispModeEvoWithVsif(pDevEvo, pOpenDev, pRequest, pReply,
+                                   bypassComposition, doRasterLock, NULL);
 }
 
 /*!

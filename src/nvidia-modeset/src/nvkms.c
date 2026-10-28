@@ -24,6 +24,7 @@
 #include "nvkms.h"
 #include "nvkms-private.h"
 #include "nvkms-api.h"
+#include "nvkms-kapi-vsif.h"
 
 #include "nvkms-types.h"
 #include "nvkms-utils.h"
@@ -5147,6 +5148,22 @@ NvBool nvKmsIoctl(
 
     if (!AssignNvKmsPerOpenType(pOpen, NvKmsPerOpenTypeIoctl, TRUE)) {
         return FALSE;
+    }
+
+    /* Keep every existing R580 userspace command and its wire layout intact. */
+    if (cmdOpaque == NVKMS_IOCTL_KAPI_SET_MODE_VSIF) {
+        struct NvKmsKapiSetModeVsif *p;
+        struct NvKmsPerOpenDev *pOpenDev;
+        if (pOpen->clientType != NVKMS_CLIENT_KERNEL_SPACE ||
+            paramSize != sizeof(*p)) {
+            return FALSE;
+        }
+        p = (void *)(NvUPtr)paramsAddress;
+        if (p == NULL) return FALSE;
+        pOpenDev = GetPerOpenDev(pOpen, p->mode.request.deviceHandle);
+        if (pOpenDev == NULL) return FALSE;
+        return nvSetDispModeEvoWithVsif(pOpenDev->pDevEvo, pOpenDev,
+            &p->mode.request, &p->mode.reply, FALSE, TRUE, p->vsif);
     }
 
     if (cmd >= ARRAY_LEN(dispatch)) {

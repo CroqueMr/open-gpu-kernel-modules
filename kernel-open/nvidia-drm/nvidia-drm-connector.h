@@ -75,6 +75,12 @@ static inline struct nv_drm_connector *to_nv_connector(
     return container_of(connector, struct nv_drm_connector, base);
 }
 
+struct nv_cb1_connector_state {
+    struct drm_connector_state base;
+    struct drm_property_blob *vsif;
+    bool dither_off;
+};
+
 static inline void nv_drm_connector_mark_connection_status_dirty(
     struct nv_drm_connector *nv_connector)
 {

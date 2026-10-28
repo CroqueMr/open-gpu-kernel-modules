@@ -34,6 +34,7 @@
 #include "nv-float.h"
 
 #include "nvkms-kapi.h"
+#include "nvkms-kapi-vsif.h"
 #include "nvkms-kapi-private.h"
 #include "nvkms-kapi-internal.h"
 #include "nvkms-kapi-notifiers.h"
@@ -3448,6 +3449,25 @@ static NvBool NvKmsKapiRequestedModeSetConfigToKms(
         paramsHead->flip.colorimetry.specified = NV_TRUE;
         paramsHead->flip.colorimetry.val = headModeSetConfig->colorimetry;
 
+        if (headModeSetConfig->colorBpc != 0) {
+            paramsHead->colorBpcSpecified = TRUE;
+            paramsHead->colorBpc = headModeSetConfig->colorBpc;
+        }
+        if (headModeSetConfig->hdmiVsifMetadata.payloadSize != 0) {
+            if (!nvCb1VsifValid(&headModeSetConfig->hdmiVsifMetadata) ||
+                headModeSetConfig->hdrInfoFrame.enabled ||
+                headModeSetConfig->colorimetry != NVKMS_OUTPUT_COLORIMETRY_DEFAULT ||
+                headModeSetConfig->colorBpc != 8 ||
+                headModeSetConfig->numDisplays != 1 || tf != NVKMS_OUTPUT_TF_NONE ||
+                !headModeSetConfig->hdmiVsifMetadata.disableDithering) {
+                return FALSE;
+            }
+            paramsHead->colorSpaceSpecified = TRUE;
+            paramsHead->colorSpace = NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_SPACE_RGB;
+            paramsHead->colorRangeSpecified = TRUE;
+            paramsHead->colorRange = NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_FULL;
+        }
+
         paramsHead->viewPortSizeIn.width =
             headModeSetConfig->mode.timings.hVisible;
         paramsHead->viewPortSizeIn.height =
@@ -3470,7 +3490,7 @@ static NvBool KmsSetMode(
     struct NvKmsSetModeParams *params = NULL;
     NvBool status = NV_FALSE;
 
-    params = nvKmsKapiCalloc(1, sizeof(*params));
+    params = nvKmsKapiCalloc(1, sizeof(struct NvKmsKapiSetModeVsif));
 
     if (params == NULL) {
         goto done;
@@ -3483,9 +3503,15 @@ static NvBool KmsSetMode(
         goto done;
     }
 
-    status = nvkms_ioctl_from_kapi_try_pmlock(device->pKmsOpen,
-                                              NVKMS_IOCTL_SET_MODE,
-                                              params, sizeof(*params));
+    {
+        struct NvKmsKapiSetModeVsif *extended = (void *)params;
+        for (NvU32 head = 0; head < NVKMS_KAPI_MAX_HEADS; head++) {
+            extended->vsif[device->dispIdx][head] =
+                requestedConfig->headRequestedConfig[head].modeSetConfig.hdmiVsifMetadata;
+        }
+        status = nvkms_ioctl_from_kapi_try_pmlock(device->pKmsOpen,
+            NVKMS_IOCTL_KAPI_SET_MODE_VSIF, extended, sizeof(*extended));
+    }
 
     replyConfig->flipResult =
         (params->reply.status == NVKMS_SET_MODE_STATUS_SUCCESS) ?
@@ -3804,7 +3830,9 @@ static NvBool ApplyModeSetConfig(
             headRequestedConfig->flags.displaysChanged     ||
             headRequestedConfig->flags.modeChanged         ||
             headRequestedConfig->flags.hdrInfoFrameChanged ||
-            headRequestedConfig->flags.colorimetryChanged;
+            headRequestedConfig->flags.colorimetryChanged ||
+            headRequestedConfig->flags.hdmiVsifMetadataChanged ||
+            headRequestedConfig->flags.colorBpcChanged;
 
         /*
          * NVKMS flip ioctl could not validate flip configuration for an
