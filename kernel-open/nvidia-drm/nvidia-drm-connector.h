@@ -45,7 +45,7 @@ struct nv_drm_connector {
     char dpAddress[NVKMS_DP_ADDRESS_STRING_LENGTH];
 
     struct nv_drm_encoder *nv_detected_encoder;
-    struct edid *edid;
+    const struct drm_edid *edid;
 
     enum NvKmsContentProtection cp;
 

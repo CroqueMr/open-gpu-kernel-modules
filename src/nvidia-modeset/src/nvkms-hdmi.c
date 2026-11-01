@@ -151,6 +151,47 @@ NvBool nvCb1HdrPotential(const NVDevEvoRec *dev)
     return nvCb1HdrSlot(&r) != 0;
 }
 
+/* Use only an advertised CTA identity; leave GENERIC to its native owners. */
+static NvU8 nvHdmiCtaVic(const NVT_EDID_INFO *edid,
+                        const NVDispHeadInfoFrameStateEvoRec *info,
+                        NvU32 customSize)
+{
+    static const NvU8 vic[] = { 0, 95, 94, 93, 98 };
+    const NVT_VENDOR_SPECIFIC_INFOFRAME_CTRL *v = &info->vendorSpecificCtrl;
+    const NVT_HDR_STATIC_METADATA *hdr = &edid->hdr_static_metadata_info;
+    NvU8 mapped;
+    unsigned ext, i;
+
+    if (customSize || !v->Enable ||
+        v->VSIFVersion != NVT_VSIF_VERSION_H14B_VSIF ||
+        v->HDMIFormat != NVT_HDMI_VS_BYTE4_HDMI_VID_FMT_EXT ||
+        v->HDMI_VIC < 1 || v->HDMI_VIC > 4 ||
+        edid->ext861.revision < NVT_CEA861_REV_B ||
+        hdr->static_metadata_type != 1 ||
+        (!hdr->supported_eotf.smpte_st_2084_eotf &&
+         !hdr->supported_eotf.future_eotf)) return 0;
+    mapped = vic[v->HDMI_VIC];
+    if (info->ctrl.video_format_id && info->ctrl.video_format_id != mapped) return 0;
+    for (ext = 0; ext < 2; ext++) {
+        const NVT_EDID_CEA861_INFO *cea = ext ? &edid->ext861_2 : &edid->ext861;
+        for (i = 0; i < cea->total_svd && i < sizeof(cea->video); i++) {
+            if (NVT_GET_CTA_8BIT_VIC(cea->video[i]) == mapped) return mapped;
+        }
+    }
+    return 0;
+}
+
+static void nvHdmiUseCtaVic(const NVT_EDID_INFO *edid,
+                           NVDispHeadInfoFrameStateEvoRec *info,
+                           NvU32 customSize)
+{
+    NvU8 vic = nvHdmiCtaVic(edid, info, customSize);
+    if (!vic) return;
+    info->ctrl.video_format_id = vic;
+    if (vic == 98) info->ctrl.pic_aspect_ratio = NVT_VIDEO_INFOFRAME_BYTE2_M1M0_NO_DATA;
+    info->vendorSpecificCtrl.Enable = FALSE;
+}
+
 NvBool nvCb1HdrValidate(const NVDpyEvoRec *dpy,
                         const NVDpyAttributeColor *color,
                         const NVHwModeTimingsEvo *timing,
@@ -161,9 +202,16 @@ NvBool nvCb1HdrValidate(const NVDpyEvoRec *dpy,
 {
     struct NvKmsCb1HdrRoute r = {0};
     const NVDevEvoRec *dev;
+    NVDispHeadInfoFrameStateEvoRec normalized;
     if (!config->deepColor && !config->enabled) { *slot = 0; return NV_TRUE; }
     if (!dpy) return NV_FALSE;
     dev = dpy->pDispEvo->pDevEvo;
+    normalized = *info;
+    if (dpy->parsedEdid.valid && !dev->caps.supportsGenericSharedInfoFrames) {
+        nvHdmiUseCtaVic(&dpy->parsedEdid.info, &normalized,
+                        flip->hdmiVsifMetadata.payloadSize);
+        info = &normalized;
+    }
     if ((config->deepColor || config->enabled) && color->bpc < 10) return NV_FALSE;
     if (config->deepColor && (!flip->hdrInfoFrame.enabled ||
         (flip->hdrInfoFrame.eotf != NVKMS_INFOFRAME_EOTF_ST2084 &&
@@ -175,7 +223,9 @@ NvBool nvCb1HdrValidate(const NVDpyEvoRec *dpy,
                            info->vendorSpecificCtrl.Enable))) return NV_FALSE;
     if (!config->enabled) { *slot = 0; return NV_TRUE; }
     nvCb1HdrCaps(dev, &r);
-    r.hdmi = nvDpyIsHdmiEvo(dpy) && dpy->parsedEdid.valid;
+    r.hdmi = nvDpyIsHdmiEvo(dpy) && dpy->parsedEdid.valid &&
+        dpy->pConnectorEvo->signalFormat == NVKMS_CONNECTOR_SIGNAL_FORMAT_TMDS &&
+        !nvDpyUsesDPLib(dpy);
     r.pq = flip->hdrInfoFrame.enabled &&
            flip->hdrInfoFrame.eotf == NVKMS_INFOFRAME_EOTF_ST2084;
     r.bt2020 = color->colorimetry == NVKMS_OUTPUT_COLORIMETRY_BT2100;
@@ -888,6 +938,7 @@ void nvUpdateHdmiInfoFrames(const NVDispEvoRec *pDispEvo,
                             NvEvoInfoFrameTransmitControl *newTransmitCtrl,
                             NVDpyEvoRec *pDpyEvo)
 {
+    NVDispHeadInfoFrameStateEvoRec normalized;
     if (!nvDpyIsHdmiEvo(pDpyEvo)) {
         return;
     }
@@ -901,6 +952,13 @@ void nvUpdateHdmiInfoFrames(const NVDispEvoRec *pDispEvo,
             pDispEvo, EVO_LOG_WARN,
             "No EDID: cannot construct video/vendor-specific info frame");
         return;
+    }
+
+    normalized = *pInfoFrameState;
+    if (!pDispEvo->pDevEvo->caps.supportsGenericSharedInfoFrames) {
+        nvHdmiUseCtaVic(&pDpyEvo->parsedEdid.info, &normalized,
+                        pDispEvo->headState[head].hdmiVsifMetadata.payloadSize);
+        pInfoFrameState = &normalized;
     }
 
     SendVideoInfoFrame(pDispEvo,
