@@ -1121,6 +1121,8 @@ AssignProposedModeSetHwState(NVDevEvoRec *pDevEvo,
                 if (!nvCb1VsifValid(&vsif[sd][apiHead]) ||
                     (vsif[sd][apiHead].payloadSize != 0 &&
                      (!nvDpyIsHdmiEvo(pDpyEvo) ||
+                      pDpyEvo->pConnectorEvo->signalFormat != NVKMS_CONNECTOR_SIGNAL_FORMAT_TMDS ||
+                      nvDpyUsesDPLib(pDpyEvo) ||
                       nvCountDpyIdsInDpyIdList(pRequestHead->dpyIdList) != 1))) {
                     pReply->disp[sd].head[apiHead].status =
                         NVKMS_SET_MODE_ONE_HEAD_STATUS_INVALID_MODE;

@@ -48,6 +48,47 @@
 
 #include <hdmipacket/nvhdmipkt.h>
 
+/* Use only an advertised CTA identity; leave GENERIC to its native owners. */
+static NvU8 nvHdmiCtaVic(const NVT_EDID_INFO *edid,
+                        const NVDispHeadInfoFrameStateEvoRec *info,
+                        NvU32 customSize)
+{
+    static const NvU8 vic[] = { 0, 95, 94, 93, 98 };
+    const NVT_VENDOR_SPECIFIC_INFOFRAME_CTRL *v = &info->vendorSpecificCtrl;
+    const NVT_HDR_STATIC_METADATA *hdr = &edid->hdr_static_metadata_info;
+    NvU8 mapped;
+    unsigned ext, i;
+
+    if (customSize || !v->Enable ||
+        v->VSIFVersion != NVT_VSIF_VERSION_H14B_VSIF ||
+        v->HDMIFormat != NVT_HDMI_VS_BYTE4_HDMI_VID_FMT_EXT ||
+        v->HDMI_VIC < 1 || v->HDMI_VIC > 4 ||
+        edid->ext861.revision < NVT_CEA861_REV_B ||
+        hdr->static_metadata_type != 1 ||
+        (!hdr->supported_eotf.smpte_st_2084_eotf &&
+         !hdr->supported_eotf.future_eotf)) return 0;
+    mapped = vic[v->HDMI_VIC];
+    if (info->ctrl.video_format_id && info->ctrl.video_format_id != mapped) return 0;
+    for (ext = 0; ext < 2; ext++) {
+        const NVT_EDID_CEA861_INFO *cea = ext ? &edid->ext861_2 : &edid->ext861;
+        for (i = 0; i < cea->total_svd && i < sizeof(cea->video); i++) {
+            if (NVT_GET_CTA_8BIT_VIC(cea->video[i]) == mapped) return mapped;
+        }
+    }
+    return 0;
+}
+
+static void nvHdmiUseCtaVic(const NVT_EDID_INFO *edid,
+                           NVDispHeadInfoFrameStateEvoRec *info,
+                           NvU32 customSize)
+{
+    NvU8 vic = nvHdmiCtaVic(edid, info, customSize);
+    if (!vic) return;
+    info->ctrl.video_format_id = vic;
+    if (vic == 98) info->ctrl.pic_aspect_ratio = NVT_VIDEO_INFOFRAME_BYTE2_M1M0_NO_DATA;
+    info->vendorSpecificCtrl.Enable = FALSE;
+}
+
 #define CAP_HDMI_SUPPORT_GPU             0x00000001
 #define CAP_HDMI_SUPPORT_MONITOR         0x00000002
 #define CAP_HDMI_SUPPORT_MONITOR_48_BPP  0x00000004
@@ -387,6 +428,7 @@ NvBool nvCb1Hdr10plusRoute(const NVDispEvoRec *disp, NvU32 apiHead,
     const struct NvKmsCb1Vsif *vsif, NvBool vrr)
 {
     const NVDpyEvoRec *dpy;
+    NVDispHeadInfoFrameStateEvoRec normalized;
     (void)apiHead;
     /* This matched image qualifies the original Pascal packet layout only. */
     if ((disp->pDevEvo->dispClass != NV9770_DISPLAY &&
@@ -394,13 +436,19 @@ NvBool nvCb1Hdr10plusRoute(const NVDispEvoRec *disp, NvU32 apiHead,
         nvCountDpyIdsInDpyIdList(dpys) != 1 ||
         color->bpc != 10 || color->colorimetry != NVKMS_OUTPUT_COLORIMETRY_BT2100 ||
         color->format != NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_SPACE_YCbCr422 ||
-        info->vendorSpecificCtrl.Enable || info->empCtrl.EnableVRR ||
+        info->empCtrl.EnableVRR ||
         vsif->payloadSize || vrr) {
         return FALSE;
     }
     dpy = nvGetOneArbitraryDpyEvo(dpys, disp);
-    return dpy && dpy->pConnectorEvo->type == NVKMS_CONNECTOR_TYPE_HDMI &&
-        nvDpyIsHdmiEvo(dpy);
+    if (!dpy || !dpy->parsedEdid.valid) return FALSE;
+    normalized = *info;
+    nvHdmiUseCtaVic(&dpy->parsedEdid.info, &normalized, vsif->payloadSize);
+    if (normalized.vendorSpecificCtrl.Enable) return FALSE;
+    return (dpy->pConnectorEvo->type == NVKMS_CONNECTOR_TYPE_HDMI ||
+            dpy->pConnectorEvo->type == NVKMS_CONNECTOR_TYPE_DP) &&
+        dpy->pConnectorEvo->signalFormat == NVKMS_CONNECTOR_SIGNAL_FORMAT_TMDS &&
+        !nvDpyUsesDPLib(dpy) && nvDpyIsHdmiEvo(dpy);
 }
 
 NvU32 nvCb1Hdr10plusStatus(NVDispEvoRec *disp, NvU32 head,
@@ -723,6 +771,7 @@ void nvUpdateHdmiInfoFrames(const NVDispEvoRec *pDispEvo,
                             const NVDispHeadInfoFrameStateEvoRec *pInfoFrameState,
                             NVDpyEvoRec *pDpyEvo)
 {
+    NVDispHeadInfoFrameStateEvoRec normalized;
     if (!nvDpyIsHdmiEvo(pDpyEvo)) {
         return;
     }
@@ -733,6 +782,11 @@ void nvUpdateHdmiInfoFrames(const NVDispEvoRec *pDispEvo,
             "No EDID: cannot construct video/vendor-specific info frame");
         return;
     }
+
+    normalized = *pInfoFrameState;
+    nvHdmiUseCtaVic(&pDpyEvo->parsedEdid.info, &normalized,
+                    pDispEvo->headState[head].hdmiVsifMetadata.payloadSize);
+    pInfoFrameState = &normalized;
 
     SendVideoInfoFrame(pDispEvo,
                        head,
