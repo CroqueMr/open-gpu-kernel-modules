@@ -24,6 +24,8 @@
 #include "nvkms.h"
 #include "nvkms-private.h"
 #include "nvkms-api.h"
+#include "nvkms-kapi-vsif.h"
+#include "nvkms-hdmi.h"
 
 #include "nvkms-types.h"
 #include "nvkms-utils.h"
@@ -5147,6 +5149,51 @@ NvBool nvKmsIoctl(
 
     if (!AssignNvKmsPerOpenType(pOpen, NvKmsPerOpenTypeIoctl, TRUE)) {
         return FALSE;
+    }
+
+    /* Keep every existing R580 userspace command and its wire layout intact. */
+    if (cmdOpaque == NVKMS_IOCTL_KAPI_HDR10PLUS_STATUS) {
+        struct NvKmsKapiHdr10plusStatus *p = (void *)(NvUPtr)paramsAddress;
+        struct NvKmsPerOpenDev *dev;
+        if (pOpen->clientType != NVKMS_CLIENT_KERNEL_SPACE ||
+            paramSize != sizeof(*p) || !p) return FALSE;
+        dev = GetPerOpenDev(pOpen, p->deviceHandle);
+        if (!dev || p->disp >= dev->pDevEvo->numSubDevices ||
+            p->head >= dev->pDevEvo->numHeads) return FALSE;
+        p->status = nvCb1Hdr10plusStatus(dev->pDevEvo->gpus[p->disp].pDispEvo,
+            p->head, p->rmId, p->latchFault);
+        return TRUE;
+    }
+    if (cmdOpaque == NVKMS_IOCTL_KAPI_FLIP_HDR10PLUS) {
+        struct NvKmsKapiFlipHdr10plus *p = (void *)(NvUPtr)paramsAddress;
+        struct NvKmsPerOpenDev *dev;
+        NvBool result;
+        if (pOpen->clientType != NVKMS_CLIENT_KERNEL_SPACE ||
+            paramSize != sizeof(*p) || !p) return FALSE;
+        dev = GetPerOpenDev(pOpen, p->flip.request.deviceHandle);
+        if (!dev || dev->pDevEvo->cb1Hdr10plusIntent) return FALSE;
+        dev->pDevEvo->cb1Hdr10plusIntent = p->hdr10plus;
+        result = Flip(pOpen, &p->flip);
+        dev->pDevEvo->cb1Hdr10plusIntent = NULL;
+        return result;
+    }
+    if (cmdOpaque == NVKMS_IOCTL_KAPI_SET_MODE_VSIF) {
+        struct NvKmsKapiSetModeVsif *p;
+        struct NvKmsPerOpenDev *pOpenDev;
+        if (pOpen->clientType != NVKMS_CLIENT_KERNEL_SPACE ||
+            paramSize != sizeof(*p)) {
+            return FALSE;
+        }
+        p = (void *)(NvUPtr)paramsAddress;
+        if (p == NULL) return FALSE;
+        pOpenDev = GetPerOpenDev(pOpen, p->mode.request.deviceHandle);
+        if (pOpenDev == NULL) return FALSE;
+        if (pOpenDev->pDevEvo->cb1Hdr10plusIntent) return FALSE;
+        pOpenDev->pDevEvo->cb1Hdr10plusIntent = p->hdr10plus;
+        ret = nvSetDispModeEvoWithVsif(pOpenDev->pDevEvo, pOpenDev,
+            &p->mode.request, &p->mode.reply, FALSE, TRUE, p->vsif);
+        pOpenDev->pDevEvo->cb1Hdr10plusIntent = NULL;
+        return ret;
     }
 
     if (cmd >= ARRAY_LEN(dispatch)) {

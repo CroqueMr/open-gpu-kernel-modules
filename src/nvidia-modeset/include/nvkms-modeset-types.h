@@ -42,6 +42,7 @@ typedef struct {
     NVDispHeadInfoFrameStateEvoRec infoFrame;
     enum NvKmsOutputTf tf;
     NvBool hdrInfoFrameOverride;
+    struct NvKmsCb1Vsif hdmiVsifMetadata;
     NvU32 hdrStaticMetadataLayerMask;
     NvBool colorSpaceSpecified : 1;
     NvBool colorBpcSpecified   : 1;
