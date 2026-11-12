@@ -279,7 +279,9 @@ static struct drm_connector_state *nv_cb1_duplicate_state(struct drm_connector *
     s = nv_drm_calloc(1, sizeof(*s));
     if (!s) return NULL;
     __drm_atomic_helper_connector_duplicate_state(c, &s->base);
-    s->vsif = drm_property_blob_get(nv_cb1_state(c->state)->vsif);
+    s->vsif = nv_cb1_state(c->state)->vsif;
+    if (s->vsif)
+        drm_property_blob_get(s->vsif);
     s->dither_off = nv_cb1_state(c->state)->dither_off;
     s->strict_deep_color = nv_cb1_state(c->state)->strict_deep_color;
     s->lldv_format = nv_cb1_state(c->state)->lldv_format;
