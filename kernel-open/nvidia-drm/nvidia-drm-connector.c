@@ -45,6 +45,12 @@
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_edid.h>
+#include <drm/drm_blend.h>
+#include <drm/drm_dvbridge_edid.h>
+#include <drm/drm_framebuffer.h>
+#include <linux/moduleparam.h>
+#include "nvkms-dv-vsif.h"
+
 #include <drm/drm_sysfs.h>
 #include <drm/drm_hdr10plus.h>
 
@@ -361,6 +367,7 @@ static struct drm_connector_state* nv_drm_connector_atomic_duplicate_state(struc
 
     nv_drm_new_connector_state->hdmi_vsif_metadata =
         nv_drm_old_connector_state->hdmi_vsif_metadata;
+    nv_drm_new_connector_state->lldv_format = nv_drm_old_connector_state->lldv_format;
     if (nv_drm_new_connector_state->hdmi_vsif_metadata) {
         drm_property_blob_get(nv_drm_new_connector_state->hdmi_vsif_metadata);
     }
@@ -426,7 +433,16 @@ static int nv_drm_connector_atomic_set_property(
     }
     
 
+    if (property == nv_dev->cb1_lldv_format_property) {
+        if (val > 1) return -EINVAL;
+        nv_connector_state->lldv_format = val;
+        return 0;
+    }
     if (property == nv_dev->nv_connector_hdmi_vsif_metadata_property) {
+        struct drm_property_blob *blob = val ? drm_property_lookup_blob(nv_dev->dev, val) : NULL;
+        const bool lldv = blob && nvDoviLowLatency(blob->data, blob->length);
+        drm_property_blob_put(blob);
+        if (lldv) return -EINVAL;
         return nv_drm_atomic_replace_property_blob_from_id_size_range(
                     nv_dev->dev,
                     &nv_connector_state->hdmi_vsif_metadata,
@@ -501,6 +517,10 @@ static int nv_drm_connector_atomic_get_property(
         return 0;
     }
 
+    if (property == nv_dev->cb1_lldv_format_property) {
+        *val = nv_connector_state->lldv_format;
+        return 0;
+    }
     if (property == nv_dev->nv_connector_hdmi_vsif_metadata_property) {
         *val = nv_connector_state->hdmi_vsif_metadata ?
             nv_connector_state->hdmi_vsif_metadata->base.id : 0;
@@ -664,6 +684,53 @@ static NvU32 nv_drm_connector_requested_bpc(
     return 0;
 }
 
+static bool nv_drm_lldv_enabled;
+module_param_named(enable_lldv_lab, nv_drm_lldv_enabled, bool, 0444);
+MODULE_PARM_DESC(enable_lldv_lab, "Expose experimental player-led YCbCr 4:2:2 on native HDMI");
+
+static bool nv_drm_lldv_supported(struct drm_connector *connector,
+                                  const struct drm_connector_state *conn,
+                                  struct drm_crtc *crtc,
+                                  const struct drm_crtc_state *state,
+                                  nv_drm_atomic_state_base_t *commit)
+{
+    const struct nv_drm_connector *nv_connector = to_nv_connector(connector);
+    const struct drm_edid *edid = nv_connector->edid;
+    const struct drm_display_mode *mode = &state->mode;
+    const unsigned int vic = drm_match_cea_mode(mode);
+    struct dvbridge_sink_caps caps;
+    const struct drm_plane_state *plane =
+        drm_atomic_get_new_plane_state(commit, crtc->primary);
+
+    if (!plane)
+        plane = crtc->primary->state;
+    if (!nv_drm_lldv_enabled || !edid ||
+        nv_connector->type != NVKMS_CONNECTOR_TYPE_HDMI ||
+        connector->status != connector_status_connected ||
+        !connector->display_info.is_hdmi || !connector->display_info.has_hdmi_infoframe ||
+        !state->active || state->vrr_enabled || state->async_flip || commit->async_update ||
+        state->connector_mask != drm_connector_mask(connector) ||
+        state->plane_mask != drm_plane_mask(crtc->primary) ||
+        state->ctm || state->gamma_lut || state->degamma_lut ||
+        conn->hdr_output_metadata || conn->hdr10plus_metadata ||
+        conn->max_requested_bpc != 8 || conn->colorspace ||
+        vic < 93 || vic > 95 ||
+        (mode->clock != 297000 && (mode->clock != 296703 || vic == 94)) ||
+        !plane || !plane->fb || plane->crtc != crtc ||
+        (plane->fb->format->format != DRM_FORMAT_XRGB8888 &&
+         plane->fb->format->format != DRM_FORMAT_ARGB8888) ||
+        plane->fb->width != 3840 || plane->fb->height != 2160 ||
+        plane->src_x || plane->src_y || plane->src_w != 3840U << 16 ||
+        plane->src_h != 2160U << 16 || plane->crtc_x || plane->crtc_y ||
+        plane->crtc_w != 3840 || plane->crtc_h != 2160 ||
+        plane->rotation != DRM_MODE_ROTATE_0 || plane->alpha != DRM_BLEND_ALPHA_OPAQUE ||
+        plane->color_pipeline)
+        return false;
+
+    caps = dvbridge_parse_edid((const u8 *)drm_edid_raw(edid), drm_edid_size(edid));
+    return dvbridge_lldv_422(caps) && !caps.legacy_vsif;
+}
+
 static int
 __nv_drm_connector_atomic_check(struct drm_connector *connector,
                                 nv_drm_atomic_state_base_t *state)
@@ -684,6 +751,7 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
     struct NvKmsKapiHeadRequestedConfig *req_config;
 
     if (!crtc) {
+        nv_new_connector_state->lldv_format = 0;
         return 0;
     }
 
@@ -761,28 +829,31 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
         }
     }
 
-    /* Handle HDMI VSIF metadata changes */
-    req_config->flags.hdmiVsifMetadataChanged =
-        !nv_drm_blobs_equal(nv_old_connector_state->hdmi_vsif_metadata,
-                            nv_new_connector_state->hdmi_vsif_metadata);
-    if (req_config->flags.hdmiVsifMetadataChanged) {
-        if (nv_new_connector_state->hdmi_vsif_metadata &&
-            nv_new_connector_state->hdmi_vsif_metadata->data) {
-            struct drm_nvidia_hdmi_vsif_metadata* vsif_metadata =
-                (struct drm_nvidia_hdmi_vsif_metadata*)
-                nv_new_connector_state->hdmi_vsif_metadata->data;
-            NvU32 payload_size =
-                nv_new_connector_state->hdmi_vsif_metadata->length;
-            WARN_ON(payload_size < NV_DRM_HDMI_VSIF_METADATA_MIN_PAYLOAD_SIZE ||
-                    payload_size > NV_DRM_HDMI_VSIF_METADATA_MAX_PAYLOAD_SIZE);
-            memcpy(req_config->modeSetConfig.hdmiVsifMetadata.payload,
-                   vsif_metadata->payload,
-                   payload_size);
-            req_config->modeSetConfig.hdmiVsifMetadata.payloadSize =
-                payload_size;
-        } else {
-            req_config->modeSetConfig.hdmiVsifMetadata.payloadSize = 0;
+    /* The effective packet belongs to this head, even after a connector moves. */
+    {
+        const struct drm_property_blob *blob = nv_new_connector_state->hdmi_vsif_metadata;
+        struct NvKmsHdmiVsifMetadata *head_vsif = &req_config->modeSetConfig.hdmiVsifMetadata;
+        struct NvKmsHdmiVsifMetadata next = {0};
+        if (nv_new_connector_state->lldv_format) {
+            if (blob || nv_new_connector_state->cb1_deep_color ||
+                nv_new_connector_state->dithering_mode != NV_DRM_DITHERING_MODE_OFF ||
+                !nv_drm_lldv_supported(connector, new_connector_state, crtc, crtc_state, state))
+                return -EINVAL;
+            next.payloadSize = sizeof(nvDoviLowLatencyPayload);
+            memcpy(next.payload, nvDoviLowLatencyPayload, next.payloadSize);
+        } else if (blob) {
+            if (blob->length > sizeof(next.payload))
+                return -EINVAL;
+            next.payloadSize = blob->length;
+            memcpy(next.payload, blob->data, next.payloadSize);
         }
+        /* The same bpc can carry a different signal. Re-evaluate RGB/full on
+         * entry and exit using the existing full link configuration path. */
+        req_config->flags.colorBpcChanged |=
+            nvDoviLowLatency(head_vsif->payload, head_vsif->payloadSize) !=
+            nvDoviLowLatency(next.payload, next.payloadSize);
+        req_config->flags.hdmiVsifMetadataChanged = memcmp(head_vsif, &next, sizeof(next)) != 0;
+        *head_vsif = next;
     }
 
     /*
@@ -985,6 +1056,11 @@ nv_drm_connector_new(struct drm_device *dev,
             drm_connector_attach_colorspace_property(&nv_connector->base);
         }
         drm_connector_attach_hdr_output_metadata_property(&nv_connector->base);
+
+        if (nv_drm_lldv_enabled && nv_connector->type == NVKMS_CONNECTOR_TYPE_HDMI &&
+            nv_dev->cb1_lldv_format_property)
+            drm_object_attach_property(&nv_connector->base.base,
+                                       nv_dev->cb1_lldv_format_property, 0);
 
         if (nv_dev->nv_connector_hdmi_vsif_metadata_property) {
             drm_object_attach_property(&nv_connector->base.base,
