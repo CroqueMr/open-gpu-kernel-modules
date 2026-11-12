@@ -29,6 +29,7 @@
 #include "nvidia-drm-crtc.h"
 #include "nvidia-drm-os-interface.h"
 #include "nvidia-drm-helper.h"
+#include "nvkms-dv-vsif.h"
 
 #if defined(NV_DRM_DRMP_H_PRESENT)
 #include <drm/drmP.h>
@@ -534,6 +535,15 @@ int nv_drm_atomic_check(struct drm_device *dev,
     }
 
     for_each_new_crtc_in_state(state, crtc, crtc_state, i) {
+        const struct NvKmsKapiHeadModeSetConfig *old_head =
+            &to_nv_crtc_state(drm_atomic_get_old_crtc_state(state, crtc))->req_config.modeSetConfig;
+        if (nvDoviLowLatency(old_head->hdmiVsifMetadata.payload,
+                             old_head->hdmiVsifMetadata.payloadSize)) {
+            /* Plane-only and CRTC-only commits must obey the carrier contract too. */
+            ret = drm_atomic_add_affected_connectors(state, crtc);
+            if (ret) goto done;
+        }
+
         /*
          * if the color management changed on the crtc, we need to update the
          * crtc's plane's CSC matrices, so add the crtc's planes to the commit
