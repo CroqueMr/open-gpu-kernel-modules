@@ -686,7 +686,7 @@ static NvU32 nv_drm_connector_requested_bpc(
 
 static bool nv_drm_lldv_enabled;
 module_param_named(enable_lldv_lab, nv_drm_lldv_enabled, bool, 0444);
-MODULE_PARM_DESC(enable_lldv_lab, "Expose experimental player-led YCbCr 4:2:2 on native HDMI");
+MODULE_PARM_DESC(enable_lldv_lab, "Legacy CB1 parameter; LLDV is selected per HDMI connector");
 
 static bool nv_drm_lldv_supported(struct drm_connector *connector,
                                   const struct drm_connector_state *conn,
@@ -704,7 +704,7 @@ static bool nv_drm_lldv_supported(struct drm_connector *connector,
 
     if (!plane)
         plane = crtc->primary->state;
-    if (!nv_drm_lldv_enabled || !edid ||
+    if (!edid ||
         nv_connector->type != NVKMS_CONNECTOR_TYPE_HDMI ||
         connector->status != connector_status_connected ||
         !connector->display_info.is_hdmi || !connector->display_info.has_hdmi_infoframe ||
@@ -1057,7 +1057,7 @@ nv_drm_connector_new(struct drm_device *dev,
         }
         drm_connector_attach_hdr_output_metadata_property(&nv_connector->base);
 
-        if (nv_drm_lldv_enabled && nv_connector->type == NVKMS_CONNECTOR_TYPE_HDMI &&
+        if (nv_connector->type == NVKMS_CONNECTOR_TYPE_HDMI &&
             nv_dev->cb1_lldv_format_property)
             drm_object_attach_property(&nv_connector->base.base,
                                        nv_dev->cb1_lldv_format_property, 0);
