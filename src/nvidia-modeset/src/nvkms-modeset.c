@@ -79,6 +79,7 @@
 #include "nvkms-evo.h"
 #include "nvkms-types.h"
 #include "nvkms-dpy.h"
+#include "nvkms-dv-vsif.h"
 #include "nvkms-rm.h"
 #include "nvkms-hdmi.h"
 #include "nvkms-hw-flip.h"
@@ -1282,7 +1283,9 @@ AssignProposedModeSetHwState(NVDevEvoRec *pDevEvo,
             if (pProposedApiHead->hdrInfoFrameOverride ||
                 (pProposedApiHead->hdrStaticMetadataLayerMask != 0) ||
                 (pProposedApiHead->attributes.color.colorimetry ==
-                    NVKMS_OUTPUT_COLORIMETRY_BT2100)) {
+                    NVKMS_OUTPUT_COLORIMETRY_BT2100 &&
+                 !nvDoviLowLatency(pProposedApiHead->hdmiVsifMetadata.payload,
+                                   pProposedApiHead->hdmiVsifMetadata.payloadSize))) {
                 const NVDpyEvoRec *pDpyEvo;
 
                 // All dpys on apiHead must support HDR.
@@ -4033,6 +4036,18 @@ done:
     return ret;
 }
 
+static NvBool Cb1NativeLldvModeValid(const NVProposedModeSetStateOneApiHead *p)
+{
+    return nvPopCount32(p->hwHeadsMask) == 1 &&
+        p->attributes.color.format == NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_SPACE_YCbCr422 &&
+        p->attributes.color.bpc == 10 &&
+        p->attributes.color.range == NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_LIMITED &&
+        p->attributes.color.colorimetry == NVKMS_OUTPUT_COLORIMETRY_BT2100 &&
+        nvEvoDpyColorToPixelDepth(&p->attributes.color) == NVKMS_PIXEL_DEPTH_20_422 &&
+        p->tf == NVKMS_OUTPUT_TF_NONE && !p->hdrInfoFrameOverride &&
+        !p->hdrStaticMetadataLayerMask;
+}
+
 /*!
  * Perform a modeset across the heads on the disps of the device.
  *
@@ -4096,6 +4111,24 @@ NvBool nvSetDispModeEvoWithVsif(NVDevEvoPtr pDevEvo,
     if (!AssignAndValidateProposedModeSet(pDevEvo, pOpenDev, pRequest, pReply,
                                           pProposed, pWorkArea, vsif)) {
         goto done;
+    }
+
+    /* Reject a native LLDV request if vendor selection substituted its link.
+     * This is before any state or hardware is changed, also for TEST_ONLY. */
+    if (vsif != NULL) {
+        NvU32 sd, apiHead;
+        FOR_ALL_EVO_DISPLAYS(pDispEvo, sd, pDevEvo) {
+            for (apiHead = 0; apiHead < pDevEvo->numApiHeads; apiHead++) {
+                const struct NvKmsSetModeOneHeadRequest *request = &pRequest->disp[sd].head[apiHead];
+                const NVProposedModeSetStateOneApiHead *proposed = &pProposed->disp[sd].apiHead[apiHead];
+                if (!(pRequest->disp[sd].requestedHeadsBitMask & NVBIT(apiHead))) continue;
+                if (nvDoviLowLatency(proposed->hdmiVsifMetadata.payload,
+                                     proposed->hdmiVsifMetadata.payloadSize) &&
+                    request->colorBpcSpecified && request->colorBpc == 10 &&
+                    !Cb1NativeLldvModeValid(proposed))
+                    goto done;
+            }
+        }
     }
 
     /* Validate typed metadata against the final bandwidth-selected mode. */
