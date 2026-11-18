@@ -57,6 +57,8 @@ void nvHdmiReportExtconAudioState(NVConnectorEvoPtr pConnectorEvo, NvBool enable
 void nvLogEdidCea861InfoEvo(NVDpyEvoPtr pDpyEvo,
                             NVEvoInfoStringPtr pInfoString);
 NvBool nvDpyIsHdmiEvo(const NVDpyEvoRec *pDpyEvo);
+NvU32 nvNativeLldvFormats(const NVDpyEvoRec *dpy);
+
 NvBool nvDpyIsHdmiDepth30Evo(const NVDpyEvoRec *pDpyEvo);
 NvBool nvDpyIsHdmiDepth36Evo(const NVDpyEvoRec *pDpyEvo);
 

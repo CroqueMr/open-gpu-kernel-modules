@@ -52,6 +52,7 @@ typedef struct {
     NvBool colorRangeSpecified      : 1;
     NvBool hs10bpcHint              : 1;
     NvBool hdmiVsifMetadataEnabled  : 1;
+    NvBool nativeLldv                : 1;
     NvBool changed                  : 1;
 } NVProposedModeSetStateOneApiHead;
 

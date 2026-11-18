@@ -1219,11 +1219,16 @@ AssignProposedModeSetHwState(NVDevEvoRec *pDevEvo,
                 }
             }
 
+            pProposedApiHead->nativeLldv = nvIsNativeLldvColor(
+                &pRequestHead->flip.hdmiVsifMetadata.vsifMetadata,
+                &pProposedApiHead->attributes.color);
+
             // If enabling HDR signaling...
             // XXX HDR TODO: Handle other colorimetries
             if (pProposedApiHead->hdrInfoFrameOverride ||
                 (pProposedApiHead->hdrStaticMetadataLayerMask != 0) ||
-                (pProposedApiHead->attributes.color.colorimetry ==
+                (!pProposedApiHead->nativeLldv &&
+                 pProposedApiHead->attributes.color.colorimetry ==
                     NVKMS_OUTPUT_COLORIMETRY_BT2100)) {
                 const NVDpyEvoRec *pDpyEvo;
 
@@ -2175,7 +2180,12 @@ ValidateProposedFlipHwStateOneSubDev(
                 &pProposedSd->head[head].flip,
                 &pProposedDisp->head[head].timings.viewPort.possibleUsage);
 
-            if (!nvValidateFlipEvoHwState(pDevEvo,
+            if (pProposedApiHead->nativeLldv !=
+                    nvIsNativeLldvSurface(&pProposedSd->head[head].flip) ||
+                (pProposedApiHead->nativeLldv &&
+                    nvNativeLldvSurfaceBits(&pProposedSd->head[head].flip) !=
+                        (pProposedApiHead->attributes.color.bpc == NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC_12 ? 16 : 10)) ||
+                !nvValidateFlipEvoHwState(pDevEvo,
                                           head,
                                           &pProposedDisp->head[head].timings,
                                           pProposedDisp->head[head].pConnectorEvo,
@@ -2891,7 +2901,8 @@ ApplyProposedModeSetHwStateOneHeadPreUpdate(
     NVDispHeadStateEvoPtr pHeadState = &pDispEvo->headState[head];
     NVEvoUpdateState *updateState = &pModesetUpdateState->updateState;
 
-    pHeadState->bypassComposition = bypassComposition;
+    /* Preserve UNORM16 through FMT/CSC/OCSC1, without the FP16 LUT/compositor. */
+    pHeadState->bypassComposition = bypassComposition || pProposedApiHead->nativeLldv;
     pHeadState->postcompColorPassthrough =
         pProposedApiHead->postcompColorPassthrough;
     pHeadState->activeRmId = pProposedApiHead->activeRmId;

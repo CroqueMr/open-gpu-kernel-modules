@@ -28,6 +28,13 @@
 #include "nvkms-types.h"
 #include "nvkms-flip-workarea.h"
 
+NvBool nvIsNativeLldvColor(const struct NvKmsHdmiVsifMetadata *vsif,
+                           const NVDpyAttributeColor *color);
+NvBool nvIsNativeLldvSurface(const NVFlipEvoHwState *flip);
+NvU32 nvNativeLldvFormat(const struct NvKmsHdmiVsifMetadata *vsif,
+                         const NVDpyAttributeColor *color);
+NvU32 nvNativeLldvSurfaceBits(const NVFlipEvoHwState *flip);
+
 NvBool nvIsLayerDirty(const struct NvKmsFlipCommonParams *pParams,
                       const NvU32 layer);
 

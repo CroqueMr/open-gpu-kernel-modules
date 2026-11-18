@@ -11,6 +11,12 @@ struct NvKmsCb1FaultParams {
     NVDpyId dpy;
     NvU32 head;
 };
+#define NVKMS_IOCTL_KAPI_NATIVE_LLDV_ACTIVE 0x10002U
+struct NvKmsNativeLldvQueryParams {
+    struct NvKmsCb1FaultParams display;
+    NvU32 active;
+    NvU32 formats;
+};
 enum {NV_CB1_SET_MODE, NV_CB1_FLIP, NV_CB1_QUERY};
 struct NvKmsCb1KapiParams {
     union {

@@ -29,6 +29,7 @@
 #include "nvkms-api.h"
 #include "nvkms-dpy.h"
 #include "nvkms-hdmi.h"
+#include "nvkms-lldv-formats.h"
 #include "nvkms-dv-vsif.h"
 #include "nvkms-evo.h"
 #include "nvkms-modepool.h"
@@ -858,6 +859,22 @@ SendHDRInfoFrame(const NVDispEvoRec *pDispEvo, const NvU32 head,
         &pEdidInfo->hdr_static_metadata_info;
     NvEvoInfoFrameTransmitFrequency frequency =
         NV_EVO_INFOFRAME_TRANSMIT_FREQUENCY_INIT;
+
+    /* LLDV has its own EOTF signaling. Clear a previous HDR10 packet rather
+     * than emitting the normal SDR transition packet alongside Dolby VSIF. */
+    if (pHeadState->bypassComposition &&
+        nvDoviLowLatency(pHeadState->hdmiVsifMetadata.payload,
+                         pHeadState->hdmiVsifMetadata.payloadSize)) {
+        if (pDevEvo->caps.supportsGenericSharedInfoFrames) {
+            UpdateInfoFrameFlipStatePre(currentTransmitCtrl, newTransmitCtrl,
+                NV_EVO_INFOFRAME_TRANSMIT_FREQUENCY_EVERY_FRAME, NV_FALSE);
+            pDevEvo->hal->DisableHdmiInfoFrame(pDispEvo, head, currentTransmitCtrl,
+                                               NVT_INFOFRAME_TYPE_DYNAMIC_RANGE_MASTERING);
+            UpdateInfoFrameFlipStatePost(currentTransmitCtrl);
+        }
+        /* On older hardware the Dolby VSIF already owns the shared slot. */
+        return;
+    }
 
     /* EDID bit 3 (named future_eotf by the timing library) advertises HLG. */
     if (pHdrInfo->static_metadata_type != 1) {
@@ -2588,6 +2605,55 @@ static NvU32 GetMaxPossibleTmdsPixelClockKHz(
     /* For 8 BPC, return maximum pixel clock. */
     nvAssert(pDpyColor->bpc == NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC_8);
     return pDpyEvo->maxSingleLinkPixelClockKHz;
+}
+
+/* Native formats usable at the highest CTA 93..95 clock (297 MHz).
+ * Dolby support is intersected by nvidia-drm, using the current raw EDID.
+ * Full mode validation remains authoritative at commit; no fallback is allowed. */
+NvU32 nvNativeLldvFormats(const NVDpyEvoRec *dpy)
+{
+    NvKmsDpyOutputColorFormatInfo supported;
+    const NVT_EDID_INFO *edid;
+    NvU32 formats = 0, format;
+    if (!dpy || !dpy->parsedEdid.valid || !nvDpyIsHdmiEvo(dpy) ||
+        nvDpyUsesDPLib(dpy) || dpy->pDispEvo->pDevEvo->numSubDevices != 1 ||
+        dpy->pConnectorEvo->signalFormat != NVKMS_CONNECTOR_SIGNAL_FORMAT_TMDS)
+        return 0;
+    edid = &dpy->parsedEdid.info;
+    supported = nvDpyGetOutputColorFormatInfo(dpy);
+    for (format = NV_LLDV_422_12; format <= NV_LLDV_LAST; format++) {
+        const NvU32 bits = nvLldvNativeBpc(format);
+        NVDpyAttributeColor color = {0};
+        enum NvKmsDpyAttributeColorBpcValue maximum;
+        if (bits == 10 && !nvDpyIsHdmiDepth30Evo(dpy))
+            continue; /* Turing can offer 12 bpc without native HDMI 10 bpc. */
+        if (nvLldvRgb(format)) {
+            maximum = supported.rgb444.maxBpc;
+            color.format = NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_FORMAT_RGB;
+            color.range = NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_FULL;
+        } else if (nvLldv444(format)) {
+            if (!edid->hdmiLlcInfo.dc_y444 ||
+                !(edid->ext861.basic_caps & NVT_CEA861_CAP_YCbCr_444))
+                continue;
+            maximum = supported.yuv444.maxBpc;
+            color.format = NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_FORMAT_YCbCr444;
+            color.range = NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_LIMITED;
+        } else {
+            maximum = supported.yuv422.maxBpc;
+            color.format = NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_FORMAT_YCbCr422;
+            color.range = NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_LIMITED;
+        }
+        if (bits > maximum)
+            continue;
+        color.bpc = bits;
+        color.colorimetry = NVKMS_OUTPUT_COLORIMETRY_BT2100;
+        if (color.format != NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_FORMAT_YCbCr422 &&
+            !edid->hdmiForumInfo.scdc_present)
+            continue; /* RGB/444 10/12 at 297 MHz exceed 340 Mcsc. */
+        if (297000 <= GetMaxPossibleTmdsPixelClockKHz(dpy, &color))
+            formats |= 1U << format;
+    }
+    return formats;
 }
 
 NvBool nvEvoHdmiTmdsMaxPixelClockCheck(

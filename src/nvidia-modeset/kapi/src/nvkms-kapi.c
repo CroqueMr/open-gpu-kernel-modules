@@ -34,6 +34,7 @@
 #include "nv-float.h"
 
 #include "nvkms-kapi.h"
+#include "nvkms-lldv-formats.h"
 #include "nvkms-dv-vsif.h"
 #include "nvkms-kapi-cb1.h"
 #include "nvkms-kapi-private.h"
@@ -2593,6 +2594,33 @@ static NvBool GetHdr10PlusState(struct NvKmsKapiDevice *device,
     return potential;
 }
 
+/* Read accepted NVKMS state under its lock; DRM's property may have been
+ * swapped before a late modeset failure. Failure to read is never active. */
+static NvU32 GetNativeLldvActive(struct NvKmsKapiDevice *device,
+                                 NvKmsKapiDisplay display, NvU32 head)
+{
+    struct NvKmsNativeLldvQueryParams p = {0};
+    if (!device) return 0;
+    p.display.device = device->hKmsDevice;
+    p.display.disp = device->hKmsDisp;
+    p.display.dpy = nvNvU32ToDpyId(display);
+    p.display.head = head;
+    return nvkms_ioctl_from_kapi(device->pKmsOpen,
+        NVKMS_IOCTL_KAPI_NATIVE_LLDV_ACTIVE, &p, sizeof(p)) ? p.active : 0;
+}
+
+static NvU32 GetNativeLldvFormats(struct NvKmsKapiDevice *device,
+                                  NvKmsKapiDisplay display)
+{
+    struct NvKmsNativeLldvQueryParams p = {0};
+    if (!device) return 0;
+    p.display.device = device->hKmsDevice;
+    p.display.disp = device->hKmsDisp;
+    p.display.dpy = nvNvU32ToDpyId(display);
+    return nvkms_ioctl_from_kapi(device->pKmsOpen,
+        NVKMS_IOCTL_KAPI_NATIVE_LLDV_ACTIVE, &p, sizeof(p)) ? p.formats : 0;
+}
+
 static NvBool MarkHdr10PlusFault(struct NvKmsKapiDevice *device,
                                  NvKmsKapiDisplay display, NvU32 head)
 {
@@ -3401,6 +3429,41 @@ static NvBool GetOutputTransferFunction(
  * Helper function to convert NvKmsKapiRequestedModeSetConfig
  * to NvKmsSetModeParams.
  */
+/* The native route uses only the output CSC: the framebuffer already contains
+ * display-mapped BT.2020 PQ. All three link attributes are exact requests. */
+static NvBool ConfigureLldvOutput(
+    const struct NvKmsKapiHeadModeSetConfig *config,
+    enum NvKmsOutputTf tf,
+    struct NvKmsSetModeOneHeadRequest *head)
+{
+    const NvU32 bits = nvLldvNativeBpc(config->lldvFormat);
+    const NvBool native = bits != 0;
+    if (!nvDoviLowLatency(config->hdmiVsifMetadata.payload,
+                         config->hdmiVsifMetadata.payloadSize))
+        return NV_TRUE;
+
+    if ((native && (config->colorBpc != bits ||
+                    config->colorimetry != NVKMS_OUTPUT_COLORIMETRY_BT2100)) ||
+        (!native && (config->colorBpc != 8 ||
+                     config->colorimetry != NVKMS_OUTPUT_COLORIMETRY_DEFAULT)) ||
+        config->hdrInfoFrame.enabled || config->cb1Hdr.enabled || config->cb1Hdr.deepColor ||
+        config->numDisplays != 1 || tf != NVKMS_OUTPUT_TF_NONE ||
+        (native && config->postcompColorPassthrough) ||
+        config->dithering.state != NV_KMS_DPY_ATTRIBUTE_REQUESTED_DITHERING_DISABLED)
+        return NV_FALSE;
+
+    head->colorFormatSpecified = TRUE;
+    head->colorFormat = !native || nvLldvRgb(config->lldvFormat) ?
+        NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_FORMAT_RGB :
+        nvLldv444(config->lldvFormat) ? NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_FORMAT_YCbCr444 :
+                                      NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_FORMAT_YCbCr422;
+    head->colorRangeSpecified = TRUE;
+    head->colorRange = !native || nvLldvRgb(config->lldvFormat) ?
+        NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_FULL : NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_LIMITED;
+    head->flip.dithering.specified = NV_TRUE;
+    return NV_TRUE;
+}
+
 static NvBool NvKmsKapiRequestedModeSetConfigToKms(
     struct NvKmsKapiDevice *device,
     const struct NvKmsKapiRequestedModeSetConfig *requestedConfig,
@@ -3539,20 +3602,8 @@ static NvBool NvKmsKapiRequestedModeSetConfigToKms(
         paramsHead->flip.postcompColorPassthrough.enabled =
             headModeSetConfig->postcompColorPassthrough;
 
-        if (nvDoviLowLatency(headModeSetConfig->hdmiVsifMetadata.payload,
-                            headModeSetConfig->hdmiVsifMetadata.payloadSize)) {
-            if (headModeSetConfig->hdrInfoFrame.enabled ||
-                headModeSetConfig->colorimetry != NVKMS_OUTPUT_COLORIMETRY_DEFAULT ||
-                headModeSetConfig->colorBpc != 8 || headModeSetConfig->numDisplays != 1 ||
-                tf != NVKMS_OUTPUT_TF_NONE ||
-                headModeSetConfig->dithering.state != NV_KMS_DPY_ATTRIBUTE_REQUESTED_DITHERING_DISABLED)
-                return NV_FALSE;
-            paramsHead->colorFormatSpecified = TRUE;
-            paramsHead->colorFormat = NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_FORMAT_RGB;
-            paramsHead->colorRangeSpecified = TRUE;
-            paramsHead->colorRange = NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_FULL;
-            paramsHead->flip.dithering.specified = NV_TRUE;
-        }
+        if (!ConfigureLldvOutput(headModeSetConfig, tf, paramsHead))
+            return NV_FALSE;
 
         if (headModeSetConfig->colorBpc != 0) {
             paramsHead->colorBpcSpecified = NV_TRUE;
@@ -4324,6 +4375,8 @@ NvBool nvKmsKapiGetFunctionsTableInternal
 
     funcsTable->getDisplayMode      = GetDisplayMode;
     funcsTable->getCurrentOutputBpc = GetCurrentOutputBpc;
+    funcsTable->getNativeLldvActive = GetNativeLldvActive;
+    funcsTable->getNativeLldvFormats = GetNativeLldvFormats;
     funcsTable->getHdr10PlusState = GetHdr10PlusState;
     funcsTable->markHdr10PlusFault = MarkHdr10PlusFault;
     funcsTable->validateDisplayMode = ValidateDisplayMode;
