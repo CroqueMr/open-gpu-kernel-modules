@@ -22,4 +22,9 @@ struct NvKmsKapiHdr10plusStatus {
     NvU32 deviceHandle, disp, head, rmId, status;
     NvBool latchFault;
 };
+#define NVKMS_IOCTL_KAPI_NATIVE_LLDV_422 0x10003U
+struct NvKmsKapiNativeLldv422 {
+    NvU32 deviceHandle, dispHandle, display, head;
+    NvBool supported, active;
+};
 #endif

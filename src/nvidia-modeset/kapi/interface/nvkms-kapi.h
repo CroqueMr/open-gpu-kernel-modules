@@ -1620,6 +1620,8 @@ struct NvKmsKapiFunctionsTable {
     NvU32 (*getHdr10plusStatus)(struct NvKmsKapiDevice *device,
                                NvKmsKapiDisplay display, NvU32 head);
     void (*markHdr10plusFault)(struct NvKmsKapiDevice *device, NvU32 head);
+    NvBool (*getNativeLldv422)(struct NvKmsKapiDevice *device, NvKmsKapiDisplay display,
+                              NvU32 head, NvBool *active);
 };
 
 /** @} */
