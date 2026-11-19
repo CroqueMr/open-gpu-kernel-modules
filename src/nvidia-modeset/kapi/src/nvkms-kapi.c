@@ -34,6 +34,7 @@
 #include "nv-float.h"
 
 #include "nvkms-kapi.h"
+#include "nvkms-dv-vsif.h"
 #include "nvkms-kapi-cb1.h"
 #include "nvkms-kapi-private.h"
 #include "nvkms-kapi-internal.h"
@@ -3537,6 +3538,21 @@ static NvBool NvKmsKapiRequestedModeSetConfigToKms(
         paramsHead->flip.postcompColorPassthrough.specified = TRUE;
         paramsHead->flip.postcompColorPassthrough.enabled =
             headModeSetConfig->postcompColorPassthrough;
+
+        if (nvDoviLowLatency(headModeSetConfig->hdmiVsifMetadata.payload,
+                            headModeSetConfig->hdmiVsifMetadata.payloadSize)) {
+            if (headModeSetConfig->hdrInfoFrame.enabled ||
+                headModeSetConfig->colorimetry != NVKMS_OUTPUT_COLORIMETRY_DEFAULT ||
+                headModeSetConfig->colorBpc != 8 || headModeSetConfig->numDisplays != 1 ||
+                tf != NVKMS_OUTPUT_TF_NONE ||
+                headModeSetConfig->dithering.state != NV_KMS_DPY_ATTRIBUTE_REQUESTED_DITHERING_DISABLED)
+                return NV_FALSE;
+            paramsHead->colorFormatSpecified = TRUE;
+            paramsHead->colorFormat = NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_FORMAT_RGB;
+            paramsHead->colorRangeSpecified = TRUE;
+            paramsHead->colorRange = NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_FULL;
+            paramsHead->flip.dithering.specified = NV_TRUE;
+        }
 
         if (headModeSetConfig->colorBpc != 0) {
             paramsHead->colorBpcSpecified = NV_TRUE;

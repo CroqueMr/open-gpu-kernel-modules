@@ -97,6 +97,7 @@
 #include "nvkms-api.h"
 
 #include "nvkms-modeset.h"
+#include "nvkms-dv-vsif.h"
 #include "nvkms-modeset-types.h"
 #include "nvkms-modeset-workarea.h"
 #include "nvkms-attributes.h"
@@ -228,6 +229,13 @@ nvGetHwModeTimings(const NVDispEvoRec *pDispEvo,
                                   pVSInfoFrameCtrl,
                                   pEmpInfoFrameCtrl)) {
         return FALSE;
+    }
+
+    if (nvDoviLowLatency(pRequestHead->flip.hdmiVsifMetadata.vsifMetadata.payload,
+                         pRequestHead->flip.hdmiVsifMetadata.vsifMetadata.payloadSize) &&
+        (!pTimings || (pTimings->protocol != NVKMS_PROTOCOL_SOR_SINGLE_TMDS_A &&
+                       pTimings->protocol != NVKMS_PROTOCOL_SOR_SINGLE_TMDS_B))) {
+        return NV_FALSE;
     }
 
     if (pDpyColor != NULL) {

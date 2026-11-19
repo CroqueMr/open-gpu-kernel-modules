@@ -86,6 +86,7 @@ struct nv_drm_connector_state {
        enum nv_drm_dithering_mode dithering_mode;
        struct drm_property_blob *hdcp_topology_blob;
        struct drm_property_blob *hdmi_vsif_metadata;
+    NvU8 lldv_format;
 };
 
 static inline struct nv_drm_connector_state *to_nv_drm_connector_state(
