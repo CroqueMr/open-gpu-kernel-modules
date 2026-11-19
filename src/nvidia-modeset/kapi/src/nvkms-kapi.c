@@ -35,6 +35,7 @@
 
 #include "nvkms-kapi.h"
 #include "nvkms-kapi-vsif.h"
+#include "nvkms-dv-vsif.h"
 #include "nvkms-kapi-private.h"
 #include "nvkms-kapi-internal.h"
 #include "nvkms-kapi-notifiers.h"
@@ -2562,6 +2563,23 @@ static NvU32 GetCurrentOutputBpc(struct NvKmsKapiDevice *device,
     return 0;
 }
 
+static NvBool GetNativeLldv422(struct NvKmsKapiDevice *device,
+                               NvKmsKapiDisplay display, NvU32 head, NvBool *active)
+{
+    struct NvKmsKapiNativeLldv422 params = { };
+    if (active) *active = NV_FALSE;
+    if (!device) return NV_FALSE;
+    params.deviceHandle = device->hKmsDevice;
+    params.dispHandle = device->hKmsDisp;
+    params.display = display;
+    params.head = head;
+    if (!nvkms_ioctl_from_kapi(device->pKmsOpen,
+        NVKMS_IOCTL_KAPI_NATIVE_LLDV_422, &params, sizeof(params)))
+        return NV_FALSE;
+    if (active) *active = params.active;
+    return params.supported;
+}
+
 static NvU32 GetHdr10plusStatus(struct NvKmsKapiDevice *device,
                                 NvKmsKapiDisplay display, NvU32 head)
 {
@@ -3401,6 +3419,32 @@ static NvBool ConfigureCb1DeepOutput(
     const struct NvKmsKapiHeadModeSetConfig *head,
     struct NvKmsSetModeOneHeadRequest *request);
 
+static NvBool ConfigureCb1VsifOutput(
+    const struct NvKmsKapiHeadModeSetConfig *head,
+    enum NvKmsOutputTf tf,
+    struct NvKmsSetModeOneHeadRequest *request)
+{
+    const struct NvKmsCb1Vsif *vsif = &head->hdmiVsifMetadata;
+    const NvBool native = nvDoviLowLatency(vsif->payload, vsif->payloadSize) &&
+                          head->colorBpc == 10;
+    if (!vsif->payloadSize) return NV_TRUE;
+    if (!nvCb1VsifValid(vsif) || head->hdrInfoFrame.enabled ||
+        head->strictDeepOutput || head->hdr10plus.enabled ||
+        head->numDisplays != 1 || tf != NVKMS_OUTPUT_TF_NONE ||
+        !vsif->disableDithering ||
+        head->colorBpc != (native ? 10 : 8) ||
+        head->colorimetry != (native ? NVKMS_OUTPUT_COLORIMETRY_BT2100 :
+                                      NVKMS_OUTPUT_COLORIMETRY_DEFAULT))
+        return NV_FALSE;
+    request->colorSpaceSpecified = NV_TRUE;
+    request->colorSpace = native ? NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_SPACE_YCbCr422 :
+                                  NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_SPACE_RGB;
+    request->colorRangeSpecified = NV_TRUE;
+    request->colorRange = native ? NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_LIMITED :
+                                  NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_FULL;
+    return NV_TRUE;
+}
+
 static NvBool NvKmsKapiRequestedModeSetConfigToKms(
     struct NvKmsKapiDevice *device,
     const struct NvKmsKapiRequestedModeSetConfig *requestedConfig,
@@ -3526,19 +3570,8 @@ static NvBool NvKmsKapiRequestedModeSetConfigToKms(
             paramsHead->colorBpcSpecified = TRUE;
             paramsHead->colorBpc = headModeSetConfig->colorBpc;
         }
-        if (headModeSetConfig->hdmiVsifMetadata.payloadSize != 0) {
-            if (!nvCb1VsifValid(&headModeSetConfig->hdmiVsifMetadata) ||
-                headModeSetConfig->hdrInfoFrame.enabled ||
-                headModeSetConfig->colorimetry != NVKMS_OUTPUT_COLORIMETRY_DEFAULT ||
-                headModeSetConfig->colorBpc != 8 ||
-                headModeSetConfig->numDisplays != 1 || tf != NVKMS_OUTPUT_TF_NONE ||
-                !headModeSetConfig->hdmiVsifMetadata.disableDithering) {
-                return FALSE;
-            }
-            paramsHead->colorSpaceSpecified = TRUE;
-            paramsHead->colorSpace = NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_SPACE_RGB;
-            paramsHead->colorRangeSpecified = TRUE;
-            paramsHead->colorRange = NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_FULL;
+        if (!ConfigureCb1VsifOutput(headModeSetConfig, tf, paramsHead)) {
+            return NV_FALSE;
         }
 
         if (!ConfigureCb1DeepOutput(headModeSetConfig, paramsHead)) {
@@ -4260,6 +4293,7 @@ NvBool nvKmsKapiGetFunctionsTableInternal
     funcsTable->destroySurface = DestroySurface;
 
     funcsTable->getDisplayMode      = GetDisplayMode;
+    funcsTable->getNativeLldv422 = GetNativeLldv422;
     funcsTable->getCurrentOutputBpc = GetCurrentOutputBpc;
     funcsTable->getHdr10plusStatus = GetHdr10plusStatus;
     funcsTable->markHdr10plusFault = MarkHdr10plusFault;
