@@ -28,6 +28,7 @@
 
 #include "nvkms-dpy.h"
 #include "nvkms-hdmi.h"
+#include "nvkms-dv-vsif.h"
 #include "nvkms-evo.h"
 #include "nvkms-modepool.h"
 #include "nvkms-rmapi.h"
@@ -428,6 +429,13 @@ static void SendVideoInfoFrame(const NVDispEvoRec *pDispEvo,
 
     CalculateVideoInfoFrameColorFormat(pDpyColor, hdTimings, pEdidInfo, &videoCtrl);
 
+    if (nvDoviLegacy(pDispEvo->headState[head].hdmiVsifMetadata.payload,
+                     pDispEvo->headState[head].hdmiVsifMetadata.payloadSize) &&
+        nvDoviHdmiVic(pInfoFrameState->ctrl.video_format_id,
+                     pInfoFrameState->vendorSpecificCtrl.HDMI_VIC)) {
+        videoCtrl.video_format_id = 0;
+    }
+
     status = NvTiming_ConstructVideoInfoframe(pEdidInfo,
                                               &videoCtrl,
                                               NULL, &VideoInfoFrame);
@@ -475,6 +483,9 @@ SendVendorSpecificInfoFrame(const NVDispEvoRec *pDispEvo,
         vendorInfoFrame.Header.length = vsif->payloadSize;
         ct_assert(sizeof(vendorInfoFrame.Data) >= sizeof(vsif->payload));
         nvkms_memcpy(&vendorInfoFrame.Data, vsif->payload, vsif->payloadSize);
+        nvDoviTiming((NvU8 *)&vendorInfoFrame.Data, vsif->payloadSize,
+                     pInfoFrameState->ctrl.video_format_id,
+                     pInfoFrameState->vendorSpecificCtrl.HDMI_VIC);
         pDevEvo->hal->SendHdmiInfoFrame(pDispEvo, head,
             NV_EVO_INFOFRAME_TRANSMIT_CONTROL_EVERY_FRAME,
             &vendorInfoFrame.Header, sizeof(vendorInfoFrame.Header) + vsif->payloadSize,
