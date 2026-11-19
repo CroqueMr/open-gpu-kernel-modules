@@ -81,6 +81,7 @@ static inline struct nv_drm_connector *to_nv_connector(
 #define NV_DRM_MAX_BPC_DEFAULT 12
 
 struct nv_drm_connector_state {
+       bool cb1_deep_color;
        struct drm_connector_state base;
        enum nv_drm_dithering_mode dithering_mode;
        struct drm_property_blob *hdcp_topology_blob;

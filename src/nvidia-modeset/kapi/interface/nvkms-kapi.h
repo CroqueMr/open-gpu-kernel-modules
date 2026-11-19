@@ -27,6 +27,7 @@
 #include "nv_mig_types.h"
 
 #include "nv-gpu-info.h"
+#include "nvkms-cb1-hdr.h"
 #include "nv_dpy_id.h"
 #include "nvkms-api-types.h"
 #include "nvkms-format.h"
@@ -369,6 +370,7 @@ struct NvKmsKapiCursorRequestedConfig {
 };
 
 struct NvKmsKapiHeadModeSetConfig {
+    struct NvKmsCb1Hdr cb1Hdr;
     /*
      * DRM distinguishes between the head state "enabled" (the specified
      * configuration for the head is valid, its resources are allocated,
@@ -1680,6 +1682,14 @@ struct NvKmsKapiFunctionsTable {
         struct NvKmsKapiDevice *device,
         const NvU32 head,
         struct NvKmsKapiVblankIntrCallback *pCallback);
+    /* Kernel-client-only diagnostic; appended to preserve preceding offsets. */
+    NvU32 (*getCurrentOutputBpc)(struct NvKmsKapiDevice *device,
+                                NvKmsKapiDisplay display, NvU32 head);
+    NvBool (*getHdr10PlusState)(struct NvKmsKapiDevice *device,
+                               NvKmsKapiDisplay display, NvU32 head,
+                               NvU32 *status);
+    NvBool (*markHdr10PlusFault)(struct NvKmsKapiDevice *device,
+                                NvKmsKapiDisplay display, NvU32 head);
 };
 
 /** @} */

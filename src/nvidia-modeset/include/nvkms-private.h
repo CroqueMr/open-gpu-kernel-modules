@@ -33,6 +33,9 @@ extern "C" {
 struct NvKmsPerOpenDev *nvAllocPerOpenDev(struct NvKmsPerOpen *pOpen,
                                           NVDevEvoPtr pDevEvo, NvBool isPrivileged);
 
+const struct NvKmsCb1Hdr *nvGetCb1HdrIntent(
+    const struct NvKmsPerOpenDev *pOpenDev, NvU32 sd, NvU32 head);
+
 void nvRevokeDevice(NVDevEvoPtr pDevEvo);
 
 void nvFreePerOpenDev(struct NvKmsPerOpen *pOpen,

@@ -32,6 +32,7 @@
 #include "nvkms-vrr.h"
 #include "nvkms-dpy.h"
 #include "nvkms-rm.h"
+#include "nvkms-hdmi.h"
 
 /*!
  * Check whether the permissions for pOpenDev allow changing the
@@ -475,6 +476,9 @@ static void FlipEvoOneApiHead(NVDispEvoRec *pDispEvo,
                               pUpdateState);
         }
     }
+    FOR_EACH_EVO_HW_HEAD_IN_MASK(pApiHeadState->hwHeadsMask, head) {
+        nvCb1HdrApply(pDispEvo, head, &pProposedApiHead->cb1Hdr, pProposedApiHead->cb1Slot);
+    }
 }
 
 static NvU32 FlipEvo2Head1OrOneDisp(NVDispEvoRec *pDispEvo,
@@ -615,6 +619,26 @@ NvBool nvFlipEvo(NVDevEvoPtr pDevEvo,
                                           allowVrr,
                                           &pWorkArea->sd[sd].head[head].newState)) {
                 goto done;
+            }
+            {
+                NVProposedFlipStateOneApiHead *proposed =
+                    &pWorkArea->disp[sd].apiHead[apiHead].proposedFlipState;
+                const struct NvKmsCb1Hdr *intent = nvGetCb1HdrIntent(pOpenDev, sd, apiHead);
+                const NVDpyEvoRec *dpy = nvGetOneArbitraryDpyEvo(pApiHeadState->activeDpys, pDispEvo);
+                if (intent) proposed->cb1Hdr = *intent;
+                proposed->cb1Hdr.specified = NV_TRUE;
+                if (!nvCb1HdrVrrTransitionValid(pDispEvo, head,
+                        &pDispEvo->headState[head].timings, dpy && nvDpyIsHdmiEvo(dpy))) goto done;
+                if ((proposed->cb1Hdr.enabled &&
+                     (nvPopCount32(pApiHeadState->hwHeadsMask) != 1 ||
+                      nvCountDpyIdsInDpyIdList(pApiHeadState->activeDpys) != 1 ||
+                      pDispEvo->headState[head].cb1HdrLedger.status == 2)) ||
+                    !nvCb1HdrValidate(dpy, &proposed->hdr.dpyColor,
+                        &pDispEvo->headState[head].timings, &pApiHeadState->infoFrame,
+                        &pWorkArea->sd[sd].head[head].newState, &proposed->cb1Hdr,
+                        pFlipHead[i].flip.layer[NVKMS_MAIN_LAYER].surface.specified &&
+                        pFlipHead[i].flip.layer[NVKMS_MAIN_LAYER].surface.handle[0] != 0,
+                        &proposed->cb1Slot)) goto done;
             }
         }
         if (dirtyMainLayer) {

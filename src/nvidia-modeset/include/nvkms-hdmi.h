@@ -30,6 +30,16 @@ extern "C" {
 
 #include "nvkms-types.h"
 
+NvBool nvCb1HdrPotential(const NVDevEvoRec *dev);
+NvBool nvCb1HdrVrrTransitionValid(const NVDispEvoRec *disp, NvU32 head,
+    const NVHwModeTimingsEvo *timing, NvBool hdmi);
+NvBool nvCb1HdrValidate(const NVDpyEvoRec *dpy, const NVDpyAttributeColor *color,
+    const NVHwModeTimingsEvo *timing, const NVDispHeadInfoFrameStateEvoRec *info,
+    const NVFlipEvoHwState *flip, const struct NvKmsCb1Hdr *config,
+    NvBool primary, NvU32 *slot);
+void nvCb1HdrApply(NVDispEvoRec *disp, NvU32 head,
+    const struct NvKmsCb1Hdr *config, NvU32 slot);
+
 void nvUpdateHdmiInfoFrames(const NVDispEvoRec *pDispEvo,
                             const NvU32 head,
                             const NVDpyAttributeColor *pDpyColor,

@@ -54,6 +54,145 @@
 #include <ctrl/ctrl2080/ctrl2080unix.h> // NV2080_CTRL_OS_UNIX_AUDIO_DYNAMIC_POWER
 
 #include <hdmipacket/nvhdmipkt.h>
+#include <class/clc770.h>
+#include <ctrl/ctrl0073/ctrl0073system.h>
+
+static NvBool nvCb1HdrWrite(const NVDispEvoRec *pDispEvo, NvU32 head,
+                            NvU32 slot, NvU32 owner, const NvU8 *packet)
+{
+    NVDevEvoRec *dev = pDispEvo->pDevEvo;
+    NVHDMIPKT_TYPE type = slot == NV_CB1_HDR_SLOT_GENERIC ?
+        NVHDMIPKT_TYPE_GENERIC : slot == NV_CB1_HDR_SLOT_ADVANCED9 ?
+        NVHDMIPKT_TYPE_SHARED_GENERIC9 : NVHDMIPKT_TYPE_SHARED_GENERIC2;
+    NvU8 expanded[36] = {0};
+    if (packet && slot != NV_CB1_HDR_SLOT_GENERIC) {
+        nvkms_memcpy(expanded, packet, 3);
+        nvkms_memcpy(expanded + 4, packet + 3, 28);
+    }
+    /* C8 owns paired slots 1/2 AVI, 3/4 EMP, 5/6 VSIF and 7/8 static HDR. */
+    if (slot == NV_CB1_HDR_SLOT_ADVANCED9) {
+        if (packet) {
+            ADVANCED_INFOFRAME info = {0};
+            info.location = INFOFRAME_CTRL_LOC_VSYNC;
+            info.runMode = INFOFRAME_CTRL_RUN_MODE_ALWAYS;
+            info.packetLen = sizeof(expanded);
+            info.pPacket = expanded;
+            return NvHdmiPkt_SetupAdvancedInfoframe(dev->hdmiLib.handle,
+                pDispEvo->displayOwner, head, type, &info) == NVHDMIPKT_SUCCESS;
+        } else {
+            ADVANCED_INFOFRAME_CTRL ctrl = {0};
+            return NvHdmiPkt_AdvancedPacketCtrl(dev->hdmiLib.handle,
+                pDispEvo->displayOwner, head, type, &ctrl) == NVHDMIPKT_SUCCESS;
+        }
+    }
+    if (!packet) {
+        return NvHdmiPkt_PacketCtrl(dev->hdmiLib.handle, pDispEvo->displayOwner,
+            owner, head, type, NVHDMIPKT_TRANSMIT_CONTROL_DISABLE) == NVHDMIPKT_SUCCESS;
+    }
+    return NvHdmiPkt_PacketWrite(dev->hdmiLib.handle, pDispEvo->displayOwner,
+        owner, head, type,
+        NVHDMIPKT_TRANSMIT_CONTROL_ENABLE_EVERY_FRAME &
+            ~DRF_DEF(_HDMI_PKT, _TRANSMIT_CTRL, _CHKSUM_HW, _EN),
+        slot == NV_CB1_HDR_SLOT_GENERIC ? 31 : 32,
+        slot == NV_CB1_HDR_SLOT_GENERIC ? packet : expanded) == NVHDMIPKT_SUCCESS;
+}
+
+void nvCb1HdrApply(NVDispEvoRec *disp, NvU32 head,
+                   const struct NvKmsCb1Hdr *config, NvU32 slot)
+{
+    struct NvKmsCb1HdrLedger *l = &disp->headState[head].cb1HdrLedger;
+    NvU32 owner = disp->headState[head].activeRmId;
+    if (!config->specified) return;
+    if (!config->enabled || (l->slot && (l->slot != slot || l->owner != owner))) {
+        NvBool ok = NV_TRUE;
+        if (l->slot) ok = nvCb1HdrWrite(disp, head, l->slot, l->owner, NULL);
+        if (l->uncertainSlot &&
+            (l->uncertainSlot != l->slot || l->uncertainOwner != l->owner)) {
+            ok = nvCb1HdrWrite(disp, head, l->uncertainSlot,
+                               l->uncertainOwner, NULL) && ok;
+        }
+        nvCb1HdrResult(l, 0, 0, ok);
+        if (!ok || !config->enabled) return;
+    }
+    if (l->status == 2) return;
+    nvCb1HdrResult(l, slot, owner,
+        nvCb1HdrWrite(disp, head, slot, owner, config->packet));
+}
+
+NvBool nvCb1HdrVrrTransitionValid(const NVDispEvoRec *disp, NvU32 head,
+                                 const NVHwModeTimingsEvo *timing, NvBool hdmi)
+{
+    const struct NvKmsCb1HdrLedger *l = &disp->headState[head].cb1HdrLedger;
+    if (!hdmi || disp->pDevEvo->caps.supportsGenericSharedInfoFrames ||
+        timing->vrr.type == NVKMS_DPY_VRR_TYPE_NONE) return NV_TRUE;
+    /* Clear in a separate accepted transaction before native EMP reuses GENERIC. */
+    return l->slot != NV_CB1_HDR_SLOT_GENERIC && l->uncertainSlot != NV_CB1_HDR_SLOT_GENERIC;
+}
+
+static void nvCb1HdrCaps(const NVDevEvoRec *dev, struct NvKmsCb1HdrRoute *r)
+{
+    r->shared = dev->caps.supportsGenericSharedInfoFrames;
+    r->ada = dev->dispClass == NVC770_DISPLAY;
+    if (!r->shared && !r->ada) {
+        NV0073_CTRL_SYSTEM_GET_CAPS_V2_PARAMS caps = {0};
+        r->swAcr = NV_TRUE;
+        if (nvRmApiControl(nvEvoGlobal.clientHandle, dev->displayCommonHandle,
+                NV0073_CTRL_CMD_SYSTEM_GET_CAPS_V2, &caps, sizeof(caps)) == NVOS_STATUS_SUCCESS) {
+            r->swAcr = NV0073_CTRL_SYSTEM_GET_CAP(caps.capsTbl,
+                NV0073_CTRL_SYSTEM_CAPS_HDMI21_SW_ACR_BUG_3275257);
+        }
+    }
+}
+
+NvBool nvCb1HdrPotential(const NVDevEvoRec *dev)
+{
+    struct NvKmsCb1HdrRoute r = {0};
+    nvCb1HdrCaps(dev, &r);
+    return nvCb1HdrSlot(&r) != 0;
+}
+
+NvBool nvCb1HdrValidate(const NVDpyEvoRec *dpy,
+                        const NVDpyAttributeColor *color,
+                        const NVHwModeTimingsEvo *timing,
+                        const NVDispHeadInfoFrameStateEvoRec *info,
+                        const NVFlipEvoHwState *flip,
+                        const struct NvKmsCb1Hdr *config,
+                        NvBool primary, NvU32 *slot)
+{
+    struct NvKmsCb1HdrRoute r = {0};
+    const NVDevEvoRec *dev;
+    if (!config->deepColor && !config->enabled) { *slot = 0; return NV_TRUE; }
+    if (!dpy) return NV_FALSE;
+    dev = dpy->pDispEvo->pDevEvo;
+    if ((config->deepColor || config->enabled) && color->bpc < 10) return NV_FALSE;
+    if (config->deepColor && (!flip->hdrInfoFrame.enabled ||
+        (flip->hdrInfoFrame.eotf != NVKMS_INFOFRAME_EOTF_ST2084 &&
+         flip->hdrInfoFrame.eotf != NVKMS_INFOFRAME_EOTF_HLG) ||
+        color->colorimetry != NVKMS_OUTPUT_COLORIMETRY_BT2100 ||
+        flip->hdmiVsifMetadata.payloadSize != 0)) return NV_FALSE;
+    if (config->deepColor && nvDpyIsHdmiEvo(dpy) &&
+        (timing->hdmi3D || (!dev->caps.supportsGenericSharedInfoFrames &&
+                           info->vendorSpecificCtrl.Enable))) return NV_FALSE;
+    if (!config->enabled) { *slot = 0; return NV_TRUE; }
+    nvCb1HdrCaps(dev, &r);
+    r.hdmi = nvDpyIsHdmiEvo(dpy) && dpy->parsedEdid.valid;
+    r.pq = flip->hdrInfoFrame.enabled &&
+           flip->hdrInfoFrame.eotf == NVKMS_INFOFRAME_EOTF_ST2084;
+    r.bt2020 = color->colorimetry == NVKMS_OUTPUT_COLORIMETRY_BT2100;
+    r.bpc = color->bpc;
+    r.primary = primary && flip->layer[NVKMS_MAIN_LAYER].pSurfaceEvo[0] != NULL;
+    r.async = flip->layer[NVKMS_MAIN_LAYER].tearing;
+    r.threeD = timing->hdmi3D;
+    r.customVsif = flip->hdmiVsifMetadata.payloadSize != 0;
+    r.vendor = info->vendorSpecificCtrl.Enable;
+    r.vrr = info->empCtrl.EnableVRR || timing->vrr.type != NVKMS_DPY_VRR_TYPE_NONE;
+    r.receiver = dpy->parsedEdid.info.ext861.valid.hdr10Plus &&
+        dpy->parsedEdid.info.hdr_static_metadata_info.static_metadata_type == 1 &&
+        dpy->parsedEdid.info.hdr_static_metadata_info.supported_eotf.smpte_st_2084_eotf;
+    r.version = dpy->parsedEdid.info.hdr10PlusInfo.application_version;
+    *slot = nvCb1HdrSlot(&r);
+    return nvCb1HdrRouteValid(&r, config->packet);
+}
 
 #define CAP_HDMI_SUPPORT_GPU             0x00000001
 #define CAP_HDMI_SUPPORT_MONITOR         0x00000002
@@ -644,6 +783,7 @@ SendVendorSpecificInfoFrame(const NVDispEvoRec *pDispEvo,
 
 static void
 SendHDRInfoFrame(const NVDispEvoRec *pDispEvo, const NvU32 head,
+                 const NVDispHeadInfoFrameStateEvoRec *pInfoFrameState,
                  NvEvoInfoFrameTransmitControl *currentTransmitCtrl,
                  NvEvoInfoFrameTransmitControl *newTransmitCtrl,
                  NVT_EDID_INFO *pEdidInfo)
@@ -657,19 +797,36 @@ SendHDRInfoFrame(const NVDispEvoRec *pDispEvo, const NvU32 head,
     NvEvoInfoFrameTransmitFrequency frequency =
         NV_EVO_INFOFRAME_TRANSMIT_FREQUENCY_INIT;
 
-    // Only send the HDMI HDR infoframe if the display supports HDR
-    if (!pHdrInfo->supported_eotf.smpte_st_2084_eotf ||
-        (pHdrInfo->static_metadata_type != 1)) {
+    /* EDID bit 3 (named future_eotf by the timing library) advertises HLG. */
+    if (pHdrInfo->static_metadata_type != 1) {
         return;
     }
+    if (pHeadState->hdrInfoFrame.state == NVKMS_HDR_INFOFRAME_STATE_ENABLED) {
+        NvBool supported = FALSE;
+        switch (pHeadState->hdrInfoFrame.eotf) {
+        case NVKMS_INFOFRAME_EOTF_SDR_GAMMA:
+            supported = pHdrInfo->supported_eotf.trad_gamma_sdr_eotf;
+            break;
+        case NVKMS_INFOFRAME_EOTF_HDR_GAMMA:
+            supported = pHdrInfo->supported_eotf.trad_gamma_hdr_eotf;
+            break;
+        case NVKMS_INFOFRAME_EOTF_ST2084:
+            supported = pHdrInfo->supported_eotf.smpte_st_2084_eotf;
+            break;
+        case NVKMS_INFOFRAME_EOTF_HLG:
+            supported = pHdrInfo->supported_eotf.future_eotf;
+            break;
+        default:
+            break;
+        }
+        if (!supported) {
+            return;
+        }
+    }
 
-    /*
-     * When the HAL does not support generic shared infoframes (e.g. on EVO1),
-     * HDR and VSIF share a single vendor-specific slot. Skip sending HDR when
-     * HDMI 3D is supported or user VSIF override is enabled.
-     */
+    /* A 3D-capable receiver alone does not own the shared packet slot. */
     if (!pDevEvo->caps.supportsGenericSharedInfoFrames &&
-        (pEdidInfo->HDMI3DSupported ||
+        (pInfoFrameState->vendorSpecificCtrl.Enable ||
          pHeadState->hdmiVsifMetadata.payloadSize != 0)) {
         return;
     }
@@ -763,6 +920,7 @@ void nvUpdateHdmiInfoFrames(const NVDispEvoRec *pDispEvo,
 
     SendHDRInfoFrame(pDispEvo,
                      head,
+                     pInfoFrameState,
                      &flipState->hdrStaticMetadataTransmitCtrl,
                      newTransmitCtrl,
                      &pDpyEvo->parsedEdid.info);

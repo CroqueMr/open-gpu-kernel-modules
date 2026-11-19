@@ -24,6 +24,8 @@
 #include "nvkms.h"
 #include "nvkms-private.h"
 #include "nvkms-api.h"
+#include "nvkms-kapi-cb1.h"
+#include "nvkms-hdmi.h"
 
 #include "nvkms-types.h"
 #include "nvkms-utils.h"
@@ -158,6 +160,7 @@ struct NvKmsPerOpenDisp {
 };
 
 struct NvKmsPerOpenDev {
+    const struct NvKmsCb1Hdr (*cb1Hdr)[NVKMS_MAX_HEADS_PER_DISP];
     NVDevEvoPtr                  pDevEvo;
     NvKmsDeviceHandle            nvKmsApiHandle;
     NVEvoApiHandlesRec           dispHandles;
@@ -170,6 +173,14 @@ struct NvKmsPerOpenDev {
     NVEvoApiHandlesRec           swapGroupHandles;
     NvU32                        openedGpuId;
 };
+
+const struct NvKmsCb1Hdr *nvGetCb1HdrIntent(
+    const struct NvKmsPerOpenDev *open, NvU32 sd, NvU32 head)
+{
+    if (!open || !open->cb1Hdr || sd >= NVKMS_MAX_SUBDEVICES ||
+        head >= NVKMS_MAX_HEADS_PER_DISP) return NULL;
+    return &open->cb1Hdr[sd][head];
+}
 
 struct NvKmsPerOpenEventListEntry {
     NVListRec                    eventListEntry;
@@ -5169,6 +5180,62 @@ NvBool nvKmsIoctl(
 
     if (!AssignNvKmsPerOpenType(pOpen, NvKmsPerOpenTypeIoctl, TRUE)) {
         return FALSE;
+    }
+
+    /* No userspace layout changes: the typed intent exists only under this lock. */
+    if (cmdOpaque == NVKMS_IOCTL_KAPI_CB1_HDR_FAULT) {
+        struct NvKmsCb1FaultParams *p = (void *)(NvUPtr)paramsAddress;
+        NVDpyEvoRec *dpy;
+        if (pOpen->clientType != NVKMS_CLIENT_KERNEL_SPACE ||
+            paramSize != sizeof(*p) || !p) return FALSE;
+        dpy = GetPerOpenDpy(pOpen, p->device, p->disp, p->dpy);
+        if (!dpy || p->head >= NVKMS_MAX_HEADS_PER_DISP ||
+            dpy->apiHead != p->head || !nvApiHeadIsActive(dpy->pDispEvo, p->head)) return FALSE;
+        dpy->pDispEvo->headState[nvGetPrimaryHwHead(dpy->pDispEvo, p->head)].cb1HdrLedger.status = 2;
+        return TRUE;
+    }
+    if (cmdOpaque == NVKMS_IOCTL_KAPI_CB1_HDR) {
+        struct NvKmsCb1KapiParams *p = (void *)(NvUPtr)paramsAddress;
+        struct NvKmsPerOpenDev *open;
+        NvKmsDeviceHandle device;
+        if (pOpen->clientType != NVKMS_CLIENT_KERNEL_SPACE ||
+            paramSize != sizeof(*p) || !p || p->operation > NV_CB1_QUERY) return FALSE;
+        device = p->operation == NV_CB1_SET_MODE ? p->u.mode.request.deviceHandle :
+                 p->operation == NV_CB1_FLIP ? p->u.flip.request.deviceHandle : p->query.device;
+        open = GetPerOpenDev(pOpen, device);
+        if (!open || open->cb1Hdr) return FALSE;
+        if (p->operation == NV_CB1_QUERY) {
+            NVDpyEvoRec *dpy = GetPerOpenDpy(pOpen, device, p->query.disp, p->query.dpy);
+            p->query.potential = open->pDevEvo->numSubDevices == 1 &&
+                                 nvCb1HdrPotential(open->pDevEvo);
+            p->query.status = 0;
+            if (dpy && nvDpyIsHdmiEvo(dpy) && dpy->apiHead == p->query.head &&
+                nvApiHeadIsActive(dpy->pDispEvo, dpy->apiHead)) {
+                NvU32 head = nvGetPrimaryHwHead(dpy->pDispEvo, dpy->apiHead);
+                const struct NvKmsCb1HdrLedger *l = &dpy->pDispEvo->headState[head].cb1HdrLedger;
+                p->query.status = l->status == 1 && l->owner !=
+                    dpy->pDispEvo->headState[head].activeRmId ? 2 : l->status;
+            }
+            return TRUE;
+        }
+        if (open->pDevEvo->numSubDevices != 1) {
+            for (NvU32 sd = 0; sd < NVKMS_MAX_SUBDEVICES; sd++) {
+                for (NvU32 head = 0; head < NVKMS_MAX_HEADS_PER_DISP; head++) {
+                    if (p->hdr[sd][head].enabled || p->hdr[sd][head].deepColor) return FALSE;
+                }
+            }
+        }
+        if (p->operation == NV_CB1_FLIP) {
+            const struct NvKmsFlipRequestOneHead *heads = nvKmsNvU64ToPointer(p->u.flip.request.pFlipHead);
+            if (!ValidateFlipHeads(open->pDevEvo, heads, p->u.flip.request.numFlipHeads)) return FALSE;
+            for (NvU32 i = 0; i < p->u.flip.request.numFlipHeads; i++) {
+                if (open->pDevEvo->pDispEvo[heads[i].sd]->pHsChannel[heads[i].head]) return FALSE;
+            }
+        }
+        open->cb1Hdr = p->hdr;
+        ret = p->operation == NV_CB1_SET_MODE ? SetMode(pOpen, &p->u.mode) : Flip(pOpen, &p->u.flip);
+        open->cb1Hdr = NULL;
+        return ret;
     }
 
     if (cmd >= ARRAY_LEN(dispatch)) {

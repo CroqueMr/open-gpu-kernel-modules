@@ -3919,16 +3919,9 @@ NvBool nvDpyIsHDRCapable(const NVDpyEvoRec *pDpyEvo)
         return FALSE;
     }
 
-    /*
-     * XXX HDR is not supported with HDMI 3D due to both using VSI
-     * infoframes.
-     */
-    if (pInfo->HDMI3DSupported) {
-        return FALSE;
-    }
-
-    // Sink should support ST2084 EOTF.
-    if (!pHdrInfo->supported_eotf.smpte_st_2084_eotf) {
+    /* Capability is independent of a currently selected 3D/VIC packet owner. */
+    if (!pHdrInfo->supported_eotf.smpte_st_2084_eotf &&
+        !pHdrInfo->supported_eotf.future_eotf) {
         return FALSE;
     }
 

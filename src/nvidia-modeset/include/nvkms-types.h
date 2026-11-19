@@ -43,6 +43,7 @@ extern "C" {
 #include <ctrl/ctrl0073/ctrl0073dfp.h>
 
 #include "nvkms-api.h"
+#include "nvkms-cb1-hdr.h"
 #include "nvkms-prealloc-types.h"
 
 #include "nvos.h"
@@ -1869,6 +1870,7 @@ typedef struct _NVHwHeadMultiTileConfigRec {
  * This structure stores information about the active per-head display state.
  */
 typedef struct _NVDispHeadStateEvoRec {
+    struct NvKmsCb1HdrLedger cb1HdrLedger;
 
     NvU32 displayRate;
 
