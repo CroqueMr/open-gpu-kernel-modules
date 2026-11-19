@@ -3,6 +3,20 @@
 #define NVKMS_DV_VSIF_H
 #include "nvtypes.h"
 
+/* This exact, zero-filled packet is generated only by the LLDV property. */
+static const NvU8 nvDoviLowLatencyPayload[27] = {0x46, 0xd0, 0, 3};
+
+static inline NvBool nvDoviLowLatency(const NvU8 *p, NvU32 size)
+{
+    NvU32 i;
+    if (!p || size != sizeof(nvDoviLowLatencyPayload))
+        return NV_FALSE;
+    for (i = 0; i < size; i++)
+        if (p[i] != nvDoviLowLatencyPayload[i])
+            return NV_FALSE;
+    return NV_TRUE;
+}
+
 /* Legacy DV reserves a 24-byte HDMI-OUI payload. Ordinary HDMI/3D and
  * modern Dolby packets must never enter this timing rewrite. */
 static inline NvBool nvDoviLegacy(const NvU8 *p, NvU32 size)
