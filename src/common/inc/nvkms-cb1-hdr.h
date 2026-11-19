@@ -30,7 +30,7 @@ static inline NvBool nvCb1HdrPacketValid(const NvU8 *p)
         p[4] != 0x8b || p[5] != 0x84 || p[6] != 0x90 ||
         (p[7] >> 6) > 1 || (p[7] & 1) || (p[30] & 0x3f) ||
         !(p[30] & 0x40) ||
-        ((p[7] >> 6) == 1 && (p[10] != 0 || p[11] != 255))) return NV_FALSE;
+        ((p[7] >> 6) == 1 && p[11] > 100 && p[11] != 255)) return NV_FALSE;
     anchors = p[18] >> 4;
     if (anchors > 9) return NV_FALSE;
     for (NvU32 i = 1; i < anchors; i++)

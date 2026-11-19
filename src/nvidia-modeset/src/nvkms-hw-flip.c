@@ -1898,7 +1898,10 @@ static NvBool ValidateHdmiVsif(const NVDevEvoRec *pDevEvo,
 {
     if (pFlipState->hdmiVsifMetadata.payloadSize != 0) {
         if ((pConnectorEvo == NULL) ||
-            (pConnectorEvo->type != NVKMS_CONNECTOR_TYPE_HDMI)) {
+            (pConnectorEvo->type != NVKMS_CONNECTOR_TYPE_HDMI &&
+             (pConnectorEvo->type != NVKMS_CONNECTOR_TYPE_DP ||
+              pConnectorEvo->signalFormat != NVKMS_CONNECTOR_SIGNAL_FORMAT_TMDS ||
+              nvConnectorUsesDPLib(pConnectorEvo)))) {
             return FALSE;
         }
         /* Prevent HDR + VSIF when both infoframes can't be sent simultaneously. */

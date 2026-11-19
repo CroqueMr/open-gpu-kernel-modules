@@ -232,7 +232,7 @@ void nvEvo1SendHdmiInfoFrame(const NVDispEvoRec *pDispEvo,
                                 head,
                                 hdmiLibType,
                                 hdmiLibTransmitCtrl,
-                                infoframeSize,
+                                infoframeSize + (needChecksum ? sizeof(checksum) : 0),
                                 infoframe);
 
     if (ret != NVHDMIPKT_SUCCESS) {

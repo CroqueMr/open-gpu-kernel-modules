@@ -35,6 +35,7 @@
 
 struct nv_drm_encoder {
     NvKmsKapiDisplay hDisplay;
+    NvKmsConnectorSignalFormat signal_format;
 
     struct nv_drm_connector *nv_connector;
 

@@ -134,6 +134,7 @@ nv_drm_encoder_new(struct drm_device *dev,
     }
 
     nv_encoder->hDisplay = hDisplay;
+    nv_encoder->signal_format = format;
 
     /* Initialize the base encoder object and add it to the drm subsystem */
 
