@@ -79,6 +79,7 @@ struct nv_cb1_connector_state {
     struct drm_connector_state base;
     struct drm_property_blob *vsif;
     bool dither_off;
+    bool strict_deep_color;
 };
 
 static inline void nv_drm_connector_mark_connection_status_dirty(
