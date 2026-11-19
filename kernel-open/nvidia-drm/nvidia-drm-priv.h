@@ -89,6 +89,7 @@ enum nv_drm_input_color_space {
 
 struct nv_drm_device {
     struct drm_property *cb1_output_bpc_property;
+    struct drm_property *cb1_native_tmds_property;
     struct drm_property *cb1_hdr10plus_status_property;
     struct drm_property *cb1_deep_color_property;
     nv_gpu_info_t gpu_info;
