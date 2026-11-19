@@ -29,6 +29,7 @@
 #include "nv-gpu-info.h"
 #include "nv_dpy_id.h"
 #include "nvkms-api-types.h"
+#include "nvkms-cb1-vsif.h"
 #include "nvkms-format.h"
 
 #define __NVKMS_KAPI_H__
@@ -412,6 +413,8 @@ struct NvKmsKapiHeadModeSetConfig {
     } olut;
 
     NvU32 olutFpNormScale;
+    struct NvKmsCb1Vsif hdmiVsifMetadata;
+    NvU32 colorBpc;
 };
 
 struct NvKmsKapiHeadRequestedConfig {
@@ -426,6 +429,8 @@ struct NvKmsKapiHeadRequestedConfig {
         NvBool legacyOlutChanged      : 1;
         NvBool olutChanged            : 1;
         NvBool olutFpNormScaleChanged : 1;
+        NvBool hdmiVsifMetadataChanged : 1;
+        NvBool colorBpcChanged : 1;
     } flags;
 
     struct NvKmsKapiCursorRequestedConfig cursorRequestedConfig;
