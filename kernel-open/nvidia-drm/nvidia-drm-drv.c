@@ -717,11 +717,21 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
 
     {
         static const struct drm_prop_enum_list formats[] = {
-            {0, "Off"}, {1, "YCbCr 4:2:2 10 bits forced"}
+            {0, "Off"}, {1, "YCbCr 4:2:2 10 bits forced"}, {2, "YCbCr 4:2:2 12 bits packed"},
+            {3, "YCbCr 4:2:2 12 bits RGB16"}, {4, "RGB 12 bits RGB16"},
+            {5, "YCbCr 4:4:4 10 bits RGB10"}, {6, "YCbCr 4:4:4 12 bits RGB16"},
+            {7, "YCbCr 4:2:2 10 bits RGB10 lab"}, {8, "RGB 10 bits RGB10"}
         };
         nv_dev->cb1_lldv_format_property = drm_property_create_enum(nv_dev->dev,
             DRM_MODE_PROP_ATOMIC, "CB1_LLDV_FORMAT", formats, ARRAY_SIZE(formats));
     }
+
+    nv_dev->cb1_native_lldv_active_property = drm_property_create_range(nv_dev->dev,
+        0, "CB1_NATIVE_LLDV_ACTIVE", 0, 8);
+    if (!nv_dev->cb1_native_lldv_active_property) return -ENOMEM;
+    nv_dev->cb1_native_lldv_formats_property = drm_property_create_range(nv_dev->dev,
+        0, "CB1_NATIVE_LLDV_FORMATS", 0, 0x1f8);
+    if (!nv_dev->cb1_native_lldv_formats_property) return -ENOMEM;
 
     nv_dev->cb1_native_tmds_property = drm_property_create_bool(nv_dev->dev,
         0, "CB1_NATIVE_TMDS");

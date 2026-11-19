@@ -22,6 +22,8 @@
  */
 
 #include "nvkms-dma.h"
+#include "nvkms-dv-vsif.h"
+#include "nvkms-lldv-formats.h"
 #include "nvkms-evo.h"
 #include "nvkms-hw-flip.h"
 #include "nvkms-utils-flip.h"
@@ -1752,6 +1754,51 @@ static NvU32 ValidateCompositionDepth(const NVFlipEvoHwState *pFlipState,
     return TRUE;
 }
 
+NvU32 nvNativeLldvFormat(const struct NvKmsHdmiVsifMetadata *vsif,
+                         const NVDpyAttributeColor *color)
+{
+    const NvBool ten = color->bpc == NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC_10;
+    if (!nvDoviLowLatency(vsif->payload, vsif->payloadSize) ||
+        (!ten && color->bpc != NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC_12) ||
+        color->colorimetry != NVKMS_OUTPUT_COLORIMETRY_BT2100)
+        return 0;
+    if (color->format == NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_FORMAT_RGB)
+        return color->range == NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_FULL ?
+            (ten ? NV_LLDV_RGB_10 : NV_LLDV_RGB_12) : 0;
+    if (color->range != NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_LIMITED)
+        return 0;
+    if (color->format == NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_FORMAT_YCbCr444)
+        return ten ? NV_LLDV_444_10 : NV_LLDV_444_12;
+    if (color->format == NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_FORMAT_YCbCr422)
+        return ten ? NV_LLDV_422_10 : NV_LLDV_422_12;
+    return 0;
+}
+
+NvBool nvIsNativeLldvColor(const struct NvKmsHdmiVsifMetadata *vsif,
+                           const NVDpyAttributeColor *color)
+{
+    return nvNativeLldvFormat(vsif, color) != 0;
+}
+
+NvU32 nvNativeLldvSurfaceBits(const NVFlipEvoHwState *flip)
+{
+    const NVSurfaceEvoRec *surface = flip->layer[NVKMS_MAIN_LAYER].pSurfaceEvo[NVKMS_LEFT];
+    if (!surface || !nvDoviLowLatency(flip->hdmiVsifMetadata.payload,
+                                     flip->hdmiVsifMetadata.payloadSize))
+        return 0;
+    switch (surface->format) {
+    case NvKmsSurfaceMemoryFormatR16G16B16A16: return 16;
+    case NvKmsSurfaceMemoryFormatA2B10G10R10:
+    case NvKmsSurfaceMemoryFormatX2B10G10R10: return 10;
+    default: return 0;
+    }
+}
+
+NvBool nvIsNativeLldvSurface(const NVFlipEvoHwState *flip)
+{
+    return nvNativeLldvSurfaceBits(flip) != 0;
+}
+
 static NvBool ValidateColorPassthroughFlipState(const NVDevEvoRec *pDevEvo,
                                                 const NvU32 head,
                                                 const NVHwModeTimingsEvo *pTimings,
@@ -1760,7 +1807,14 @@ static NvBool ValidateColorPassthroughFlipState(const NVDevEvoRec *pDevEvo,
     const NVFlipChannelEvoHwState *pHwState =
         &pFlipState->layer[NVKMS_MAIN_LAYER];
     const NVSurfaceEvoRec *pMainSurface = pHwState->pSurfaceEvo[NVKMS_LEFT];
+    const NvBool nativeLldv = nvIsNativeLldvSurface(pFlipState);
     NvU32 layer;
+
+    /* Keep the output CSC active; neither passthrough flag has this contract. */
+    if (nativeLldv && (pHwState->precompColorPassthrough ||
+                      pFlipState->postcompColorPassthrough ||
+                      pFlipState->hdrInfoFrame.enabled))
+        return FALSE;
 
     if (!pDevEvo->hal->caps.supportsColorPassthrough) {
         if (pHwState->precompColorPassthrough ||
@@ -1776,14 +1830,21 @@ static NvBool ValidateColorPassthroughFlipState(const NVDevEvoRec *pDevEvo,
         }
     }
 
+    if (nativeLldv) {
+        for (layer = 0; layer < pDevEvo->head[head].numLayers; layer++) {
+            if (pFlipState->layer[layer].hdrStaticMetadata.enabled)
+                return FALSE;
+        }
+    }
+
     /* Validate precomp color passthrough on the main layer. */
-    if (pHwState->precompColorPassthrough) {
+    if (pHwState->precompColorPassthrough || nativeLldv) {
         /*
          * In the case where precomp color passthrough is enabled and
          * postcomp color passthrough is disabled, the surface format
          * must be FP16.
          */
-        if (!pFlipState->postcompColorPassthrough) {
+        if (!nativeLldv && !pFlipState->postcompColorPassthrough) {
             if (pMainSurface) {
                 if ((pMainSurface->format != NvKmsSurfaceMemoryFormatRF16GF16BF16AF16) &&
                     (pMainSurface->format != NvKmsSurfaceMemoryFormatRF16GF16BF16XF16)) {
@@ -1844,13 +1905,13 @@ static NvBool ValidateColorPassthroughFlipState(const NVDevEvoRec *pDevEvo,
     }
 
     /* Validate postcomp color passthrough (per-head). */
-    if (pFlipState->postcompColorPassthrough) {
+    if (pFlipState->postcompColorPassthrough || nativeLldv) {
         /*
          * Precomp color passthrough must be enabled as the ILUT
          * would convert the input to FP16, which can't be outputted
          * without the OLUT to convert it back.
          */
-        if (!pHwState->precompColorPassthrough) {
+        if (!nativeLldv && !pHwState->precompColorPassthrough) {
             return FALSE;
         }
 

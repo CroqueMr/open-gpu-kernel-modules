@@ -50,6 +50,7 @@
 #include <drm/drm_framebuffer.h>
 #include <linux/moduleparam.h>
 #include "nvkms-dv-vsif.h"
+#include "nvkms-lldv-formats.h"
 
 #include <drm/drm_sysfs.h>
 #include <drm/drm_hdr10plus.h>
@@ -416,7 +417,9 @@ static int nv_drm_connector_atomic_set_property(
         nv_connector_state->cb1_deep_color = val;
         return 0;
     }
-    if (property == nv_dev->cb1_native_tmds_property ||
+    if (property == nv_dev->cb1_native_lldv_formats_property ||
+        property == nv_dev->cb1_native_lldv_active_property ||
+        property == nv_dev->cb1_native_tmds_property ||
         property == nv_dev->cb1_output_bpc_property ||
         property == nv_dev->cb1_hdr10plus_status_property) {
         return -EINVAL;
@@ -434,7 +437,7 @@ static int nv_drm_connector_atomic_set_property(
     
 
     if (property == nv_dev->cb1_lldv_format_property) {
-        if (val > 1) return -EINVAL;
+        if (val > NV_LLDV_LAST) return -EINVAL;
         nv_connector_state->lldv_format = val;
         return 0;
     }
@@ -469,6 +472,30 @@ static NvU32 nv_drm_connector_current_output_bpc(
         to_nv_crtc(state->crtc)->head);
 }
 
+static NvU32 nv_drm_native_lldv_formats(const struct drm_connector *connector)
+{
+    const struct nv_drm_connector *nv_conn = to_nv_connector(connector);
+    struct nv_drm_device *nv_dev = to_nv_device(connector->dev);
+    struct dvbridge_sink_caps caps;
+    NvU32 formats;
+    if (connector->status != connector_status_connected || !nv_conn->edid ||
+        !nv_conn->nv_detected_encoder || nv_conn->type != NVKMS_CONNECTOR_TYPE_HDMI)
+        return 0;
+    caps = dvbridge_parse_edid((const u8 *)drm_edid_raw(nv_conn->edid),
+                               drm_edid_size(nv_conn->edid));
+    if (!dvbridge_lldv_422(caps) || caps.legacy_vsif)
+        return 0;
+    formats = nvKms->getNativeLldvFormats(nv_dev->pDevice,
+        nv_conn->nv_detected_encoder->hDisplay);
+    if (!dvbridge_lldv_422_12(caps))
+        formats &= ~(1U << NV_LLDV_422_12);
+    if (dvbridge_lldv_444_bits(caps) != 10)
+        formats &= ~((1U << NV_LLDV_RGB_10) | (1U << NV_LLDV_444_10));
+    if (dvbridge_lldv_444_bits(caps) != 12)
+        formats &= ~((1U << NV_LLDV_RGB_12) | (1U << NV_LLDV_444_12));
+    return formats;
+}
+
 static int nv_drm_connector_atomic_get_property(
     struct drm_connector *connector,
     const struct drm_connector_state *state,
@@ -501,6 +528,21 @@ static int nv_drm_connector_atomic_get_property(
                 to_nv_crtc(state->crtc)->head, &status);
         }
         *val = status;
+        return 0;
+    }
+
+    if (property == nv_dev->cb1_native_lldv_formats_property) {
+        *val = nv_drm_native_lldv_formats(connector);
+        return 0;
+    }
+
+    if (property == nv_dev->cb1_native_lldv_active_property) {
+        *val = 0;
+        if (connector->status == connector_status_connected && state->crtc &&
+            state->best_encoder && state->crtc->state->active)
+            *val = nvKms->getNativeLldvActive(nv_dev->pDevice,
+                to_nv_encoder(state->best_encoder)->hDisplay,
+                to_nv_crtc(state->crtc)->head);
         return 0;
     }
 
@@ -696,6 +738,9 @@ static bool nv_drm_lldv_supported(struct drm_connector *connector,
 {
     const struct nv_drm_connector *nv_connector = to_nv_connector(connector);
     const struct drm_edid *edid = nv_connector->edid;
+    const unsigned format = to_nv_drm_connector_state_const(conn)->lldv_format;
+    const unsigned bpc = nvLldvNativeBpc(format);
+    const bool native = bpc != 0;
     const struct drm_display_mode *mode = &state->mode;
     const unsigned int vic = drm_match_cea_mode(mode);
     struct dvbridge_sink_caps caps;
@@ -713,12 +758,16 @@ static bool nv_drm_lldv_supported(struct drm_connector *connector,
         state->plane_mask != drm_plane_mask(crtc->primary) ||
         state->ctm || state->gamma_lut || state->degamma_lut ||
         conn->hdr_output_metadata || conn->hdr10plus_metadata ||
-        conn->max_requested_bpc != 8 || conn->colorspace ||
+        conn->max_requested_bpc != (native ? bpc : 8) || conn->colorspace ||
+        (native && !(nv_drm_native_lldv_formats(connector) & (1U << format))) ||
         vic < 93 || vic > 95 ||
         (mode->clock != 297000 && (mode->clock != 296703 || vic == 94)) ||
         !plane || !plane->fb || plane->crtc != crtc ||
-        (plane->fb->format->format != DRM_FORMAT_XRGB8888 &&
-         plane->fb->format->format != DRM_FORMAT_ARGB8888) ||
+        (native ? (bpc == 12 ? plane->fb->format->format != DRM_FORMAT_ABGR16161616 :
+          (plane->fb->format->format != DRM_FORMAT_XBGR2101010 &&
+           plane->fb->format->format != DRM_FORMAT_ABGR2101010)) :
+         (plane->fb->format->format != DRM_FORMAT_XRGB8888 &&
+          plane->fb->format->format != DRM_FORMAT_ARGB8888)) ||
         plane->fb->width != 3840 || plane->fb->height != 2160 ||
         plane->src_x || plane->src_y || plane->src_w != 3840U << 16 ||
         plane->src_h != 2160U << 16 || plane->crtc_x || plane->crtc_y ||
@@ -728,7 +777,8 @@ static bool nv_drm_lldv_supported(struct drm_connector *connector,
         return false;
 
     caps = dvbridge_parse_edid((const u8 *)drm_edid_raw(edid), drm_edid_size(edid));
-    return dvbridge_lldv_422(caps) && !caps.legacy_vsif;
+    return dvbridge_lldv_422(caps) && !caps.legacy_vsif &&
+        (format != 2 || dvbridge_lldv_422_12(caps));
 }
 
 static int
@@ -816,7 +866,9 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
      * this head; a change needs a modeset.
      */
     {
-        const NvU32 bpc = (req_config->modeSetConfig.cb1Hdr.enabled ||
+        const NvU32 nativeBpc = nvLldvNativeBpc(nv_new_connector_state->lldv_format);
+        const NvU32 bpc = nativeBpc ? nativeBpc :
+            (req_config->modeSetConfig.cb1Hdr.enabled ||
             req_config->modeSetConfig.cb1Hdr.deepColor) ?
             (new_connector_state->max_requested_bpc >= 12 ? 12 : 10) :
             nv_drm_connector_requested_bpc(new_connector_state);
@@ -827,6 +879,12 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
             req_config->modeSetConfig.colorBpc = bpc;
             req_config->flags.colorBpcChanged = NV_TRUE;
         }
+    }
+
+    /* Encoding changes require a modeset even when depth and BT.2020 stay equal. */
+    if (req_config->modeSetConfig.lldvFormat != nv_new_connector_state->lldv_format) {
+        req_config->flags.colorBpcChanged = NV_TRUE;
+        req_config->modeSetConfig.lldvFormat = nv_new_connector_state->lldv_format;
     }
 
     /* The effective packet belongs to this head, even after a connector moves. */
@@ -914,12 +972,15 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
     }
 
     req_config->flags.colorimetryChanged =
-        (old_connector_state->colorspace != new_connector_state->colorspace);
+        (old_connector_state->colorspace != new_connector_state->colorspace) ||
+        (!!nvLldvNativeBpc(nv_old_connector_state->lldv_format) !=
+         !!nvLldvNativeBpc(nv_new_connector_state->lldv_format));
     // When adding a case here, also add to __nv_drm_connector_supported_colorspaces
     switch (new_connector_state->colorspace) {
         case DRM_MODE_COLORIMETRY_DEFAULT:
             req_config->modeSetConfig.colorimetry =
-                NVKMS_OUTPUT_COLORIMETRY_DEFAULT;
+                nvLldvNativeBpc(nv_new_connector_state->lldv_format) ?
+                NVKMS_OUTPUT_COLORIMETRY_BT2100 : NVKMS_OUTPUT_COLORIMETRY_DEFAULT;
             break;
         case DRM_MODE_COLORIMETRY_BT601_YCC:
             req_config->modeSetConfig.colorimetry =
@@ -1058,9 +1119,14 @@ nv_drm_connector_new(struct drm_device *dev,
         drm_connector_attach_hdr_output_metadata_property(&nv_connector->base);
 
         if (nv_connector->type == NVKMS_CONNECTOR_TYPE_HDMI &&
-            nv_dev->cb1_lldv_format_property)
+            nv_dev->cb1_lldv_format_property) {
             drm_object_attach_property(&nv_connector->base.base,
                                        nv_dev->cb1_lldv_format_property, 0);
+            drm_object_attach_property(&nv_connector->base.base,
+                                       nv_dev->cb1_native_lldv_active_property, 0);
+            drm_object_attach_property(&nv_connector->base.base,
+                                       nv_dev->cb1_native_lldv_formats_property, 0);
+        }
 
         if (nv_dev->nv_connector_hdmi_vsif_metadata_property) {
             drm_object_attach_property(&nv_connector->base.base,

@@ -159,7 +159,15 @@ static NvBool UpdateProposedFlipStateOneApiHead(
         &pDispEvo->apiHeadState[apiHead];
     const NVDpyEvoRec *pDpyEvo =
         nvGetOneArbitraryDpyEvo(pApiHeadState->activeDpys, pDispEvo);
+    const NvU32 primaryHead = nvGetPrimaryHwHead(pDispEvo, apiHead);
+    const struct NvKmsHdmiVsifMetadata *vsif;
     NvU32 layer;
+
+    if (primaryHead == NV_INVALID_HEAD)
+        return FALSE;
+    vsif = pParams->hdmiVsifMetadata.specified ?
+        &pParams->hdmiVsifMetadata.vsifMetadata :
+        &pDispEvo->headState[primaryHead].hdmiVsifMetadata;
 
     if (pParams->tf.specified) {
         pProposedApiHead->dirty.hdr = TRUE;
@@ -222,7 +230,8 @@ static NvBool UpdateProposedFlipStateOneApiHead(
         // XXX HDR TODO: Handle other colorimetries
         if (pProposedApiHead->hdr.infoFrameOverride ||
             (pProposedApiHead->hdr.staticMetadataLayerMask != 0) ||
-            (pProposedApiHead->hdr.dpyColor.colorimetry ==
+            (!nvIsNativeLldvColor(vsif, &pProposedApiHead->hdr.dpyColor) &&
+             pProposedApiHead->hdr.dpyColor.colorimetry ==
                 NVKMS_OUTPUT_COLORIMETRY_BT2100)) {
             const NVDpyEvoRec *pDpyEvoIter;
 
@@ -623,6 +632,15 @@ NvBool nvFlipEvo(NVDevEvoPtr pDevEvo,
             {
                 NVProposedFlipStateOneApiHead *proposed =
                     &pWorkArea->disp[sd].apiHead[apiHead].proposedFlipState;
+                const NVFlipEvoHwState *flip = &pWorkArea->sd[sd].head[head].newState;
+                const NvU32 native = nvNativeLldvFormat(&flip->hdmiVsifMetadata,
+                                                         &proposed->hdr.dpyColor);
+                /* Enter/leave this pipeline only through a full modeset. */
+                if (!!native != nvIsNativeLldvSurface(flip) ||
+                    (native && nvNativeLldvSurfaceBits(flip) !=
+                        (proposed->hdr.dpyColor.bpc == NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC_12 ? 16 : 10)) ||
+                    native != nvNativeLldvFormat(&pDispEvo->headState[head].hdmiVsifMetadata,
+                                                 &pApiHeadState->attributes.color)) goto done;
                 const struct NvKmsCb1Hdr *intent = nvGetCb1HdrIntent(pOpenDev, sd, apiHead);
                 const NVDpyEvoRec *dpy = nvGetOneArbitraryDpyEvo(pApiHeadState->activeDpys, pDispEvo);
                 if (intent) proposed->cb1Hdr = *intent;

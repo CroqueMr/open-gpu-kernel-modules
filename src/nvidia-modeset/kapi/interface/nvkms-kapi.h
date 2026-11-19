@@ -430,6 +430,7 @@ struct NvKmsKapiHeadModeSetConfig {
      * connector property.
      */
     NvU32 colorBpc;
+    NvU32 lldvFormat;
 };
 
 struct NvKmsKapiHeadRequestedConfig {
@@ -1690,6 +1691,10 @@ struct NvKmsKapiFunctionsTable {
                                NvU32 *status);
     NvBool (*markHdr10PlusFault)(struct NvKmsKapiDevice *device,
                                 NvKmsKapiDisplay display, NvU32 head);
+    NvU32 (*getNativeLldvActive)(struct NvKmsKapiDevice *device,
+                                 NvKmsKapiDisplay display, NvU32 head);
+    NvU32 (*getNativeLldvFormats)(struct NvKmsKapiDevice *device,
+                                 NvKmsKapiDisplay display);
 };
 
 /** @} */

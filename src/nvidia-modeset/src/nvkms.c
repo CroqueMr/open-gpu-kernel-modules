@@ -26,6 +26,7 @@
 #include "nvkms-api.h"
 #include "nvkms-kapi-cb1.h"
 #include "nvkms-hdmi.h"
+#include "nvkms-hw-flip.h"
 
 #include "nvkms-types.h"
 #include "nvkms-utils.h"
@@ -5057,6 +5058,28 @@ static NvBool UnregisterVblankIntrCallback(struct NvKmsPerOpen *pOpen,
  * \return  Return TRUE if the ioctl operation was successfully
  *          performed.  Otherwise, return FALSE.
  */
+/* Native LLDV is an accepted transport state, not the writable DRM intent. */
+static NvU32 CurrentNativeLldvActive(const NVDpyEvoRec *dpy, NvU32 apiHead)
+{
+    const NVDispEvoRec *disp;
+    const NVDispHeadStateEvoRec *state;
+    NvU32 head;
+    if (!dpy || !nvDpyIsHdmiEvo(dpy) || apiHead >= NVKMS_MAX_HEADS_PER_DISP ||
+        dpy->apiHead != apiHead || !nvApiHeadIsActive(dpy->pDispEvo, apiHead))
+        return FALSE;
+    disp = dpy->pDispEvo;
+    head = nvGetPrimaryHwHead(disp, apiHead);
+    if (head == NV_INVALID_HEAD)
+        return FALSE;
+    state = &disp->headState[head];
+    if (!state->bypassComposition || state->postcompColorPassthrough ||
+        state->tf != NVKMS_OUTPUT_TF_NONE || state->hdrInfoFrameOverride.enabled ||
+        (state->timings.protocol != NVKMS_PROTOCOL_SOR_SINGLE_TMDS_A &&
+         state->timings.protocol != NVKMS_PROTOCOL_SOR_SINGLE_TMDS_B))
+        return 0;
+    return nvNativeLldvFormat(&state->hdmiVsifMetadata, &dpy->currentAttributes.color);
+}
+
 NvBool nvKmsIoctl(
     void *pOpenVoid,
     const NvU32 cmdOpaque,
@@ -5192,6 +5215,16 @@ NvBool nvKmsIoctl(
         if (!dpy || p->head >= NVKMS_MAX_HEADS_PER_DISP ||
             dpy->apiHead != p->head || !nvApiHeadIsActive(dpy->pDispEvo, p->head)) return FALSE;
         dpy->pDispEvo->headState[nvGetPrimaryHwHead(dpy->pDispEvo, p->head)].cb1HdrLedger.status = 2;
+        return TRUE;
+    }
+    if (cmdOpaque == NVKMS_IOCTL_KAPI_NATIVE_LLDV_ACTIVE) {
+        struct NvKmsNativeLldvQueryParams *p = (void *)(NvUPtr)paramsAddress;
+        const NVDpyEvoRec *dpy;
+        if (pOpen->clientType != NVKMS_CLIENT_KERNEL_SPACE ||
+            paramSize != sizeof(*p) || !p) return FALSE;
+        dpy = GetPerOpenDpy(pOpen, p->display.device, p->display.disp, p->display.dpy);
+        p->active = CurrentNativeLldvActive(dpy, p->display.head);
+        p->formats = nvNativeLldvFormats(dpy);
         return TRUE;
     }
     if (cmdOpaque == NVKMS_IOCTL_KAPI_CB1_HDR) {
