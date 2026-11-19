@@ -29,6 +29,7 @@
 #include "nvkms-api.h"
 #include "nvkms-dpy.h"
 #include "nvkms-hdmi.h"
+#include "nvkms-dv-vsif.h"
 #include "nvkms-evo.h"
 #include "nvkms-modepool.h"
 #include "nvkms-rmapi.h"
@@ -521,6 +522,13 @@ static void SendVideoInfoFrame(const NVDispEvoRec *pDispEvo,
 
     CalculateVideoInfoFrameColorFormat(pDpyColor, hdTimings, pEdidInfo, &videoCtrl);
 
+    if (nvDoviLegacy(pDispEvo->headState[head].hdmiVsifMetadata.payload,
+                     pDispEvo->headState[head].hdmiVsifMetadata.payloadSize) &&
+        nvDoviHdmiVic(pInfoFrameState->ctrl.video_format_id,
+                     pInfoFrameState->vendorSpecificCtrl.HDMI_VIC)) {
+        videoCtrl.video_format_id = 0;
+    }
+
     status = NvTiming_ConstructVideoInfoframe(pEdidInfo,
                                               &videoCtrl,
                                               NULL, &VideoInfoFrame);
@@ -571,6 +579,11 @@ SendVendorSpecificInfoFrame(const NVDispEvoRec *pDispEvo,
         nvkms_memcpy(&vendorInfoFrame.Data,
                      pHeadState->hdmiVsifMetadata.payload,
                      pHeadState->hdmiVsifMetadata.payloadSize);
+
+        nvDoviTiming((NvU8 *)&vendorInfoFrame.Data,
+                     pHeadState->hdmiVsifMetadata.payloadSize,
+                     pInfoFrameState->ctrl.video_format_id,
+                     pInfoFrameState->vendorSpecificCtrl.HDMI_VIC);
 
         UpdateInfoFrameFlipStatePre(currentTransmitCtrl, newTransmitCtrl, NV_EVO_INFOFRAME_TRANSMIT_FREQUENCY_EVERY_FRAME, NV_TRUE);
 
