@@ -289,6 +289,11 @@ nv_drm_connector_atomic_create_state(struct drm_connector *connector)
     __drm_atomic_helper_connector_state_reset(&nv_connector_state->base, connector);
 #endif
 
+    if (connector->max_bpc_property) {
+        nv_connector_state->base.max_requested_bpc = NV_DRM_MAX_BPC_DEFAULT;
+        nv_connector_state->base.max_bpc = NV_DRM_MAX_BPC_DEFAULT;
+    }
+
     return &nv_connector_state->base;
 }
 #else
@@ -310,6 +315,11 @@ static void nv_drm_connector_reset(struct drm_connector *connector)
     }
 
     __drm_atomic_helper_connector_reset(connector, &nv_connector_state->base);
+
+    if (connector->max_bpc_property) {
+        nv_connector_state->base.max_requested_bpc = NV_DRM_MAX_BPC_DEFAULT;
+        nv_connector_state->base.max_bpc = NV_DRM_MAX_BPC_DEFAULT;
+    }
 }
 #endif
 
@@ -567,6 +577,22 @@ static const NvU32 __nv_drm_connector_supported_colorspaces =
 #endif
 
 #if defined(NV_DRM_CONNECTOR_ATTACH_HDR_OUTPUT_METADATA_PROPERTY_PRESENT)
+/*
+ * Output depth requested through "max bpc": 8 below 10, otherwise 0 (let the
+ * driver choose). A zero value (a state reset before the property existed)
+ * also means the driver's choice.
+ */
+static NvU32 nv_drm_connector_requested_bpc(
+    const struct drm_connector_state *connector_state)
+{
+    if (connector_state->connector->max_bpc_property &&
+        connector_state->max_requested_bpc >= 8 &&
+        connector_state->max_requested_bpc < 10) {
+        return 8;
+    }
+    return 0;
+}
+
 static int
 __nv_drm_connector_atomic_check(struct drm_connector *connector,
                                 nv_drm_atomic_state_base_t *state)
@@ -608,6 +634,20 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
         }
         req_config->modeSetConfig.dithering.state = state;
         req_config->modeSetConfig.dithering.mode = mode;
+    }
+
+    /*
+     * Handle "max bpc" changes. Compare with the head's inherited
+     * configuration, so that the depth also follows a connector moving to
+     * this head; a change needs a modeset.
+     */
+    {
+        const NvU32 bpc = nv_drm_connector_requested_bpc(new_connector_state);
+
+        if (req_config->modeSetConfig.colorBpc != bpc) {
+            req_config->modeSetConfig.colorBpc = bpc;
+            req_config->flags.colorBpcChanged = NV_TRUE;
+        }
     }
 
     /* Handle HDMI VSIF metadata changes */
@@ -841,6 +881,20 @@ nv_drm_connector_new(struct drm_device *dev,
         drm_connector_attach_hdr_output_metadata_property(&nv_connector->base);
     }
 #endif /* defined(NV_DRM_CONNECTOR_ATTACH_HDR_OUTPUT_METADATA_PROPERTY_PRESENT) */
+
+    /* Attach the standard "max bpc" property to HDMI connectors */
+    if ((nv_connector->type == NVKMS_CONNECTOR_TYPE_HDMI) &&
+        nv_dev->nv_connector_max_bpc_property) {
+        nv_connector->base.max_bpc_property =
+            nv_dev->nv_connector_max_bpc_property;
+        drm_object_attach_property(&nv_connector->base.base,
+                                   nv_dev->nv_connector_max_bpc_property,
+                                   NV_DRM_MAX_BPC_DEFAULT);
+        if (nv_connector->base.state) {
+            nv_connector->base.state->max_requested_bpc = NV_DRM_MAX_BPC_DEFAULT;
+            nv_connector->base.state->max_bpc = NV_DRM_MAX_BPC_DEFAULT;
+        }
+    }
 
     /* Attach dithering mode property */
     if (nv_dev->nv_connector_dithering_mode_property) {
