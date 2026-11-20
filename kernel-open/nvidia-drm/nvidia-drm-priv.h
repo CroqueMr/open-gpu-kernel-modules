@@ -176,6 +176,9 @@ struct nv_drm_device {
     struct drm_property *nv_crtc_regamma_lut_property;
     struct drm_property *nv_crtc_regamma_lut_size_property;
     struct drm_property *nv_crtc_regamma_divisor_property;
+    struct drm_property *cb1_vsif_property;
+    struct drm_property *cb1_bpc_property;
+    struct drm_property *cb1_dither_property;
 
     struct nv_drm_device *next;
 

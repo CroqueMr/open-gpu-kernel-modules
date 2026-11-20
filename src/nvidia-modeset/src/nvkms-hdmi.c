@@ -463,6 +463,25 @@ SendVendorSpecificInfoFrame(const NVDispEvoRec *pDispEvo,
     NVT_VENDOR_SPECIFIC_INFOFRAME vendorInfoFrame;
     NVT_STATUS status;
 
+    /* Adapted from NVIDIA 615: use the native HDMI packet writer on Pascal. */
+    const struct NvKmsCb1Vsif *vsif = &pDispEvo->headState[head].hdmiVsifMetadata;
+    if (vsif->payloadSize != 0) {
+        if (!nvCb1VsifValid(vsif)) {
+            return;
+        }
+        nvkms_memset(&vendorInfoFrame, 0, sizeof(vendorInfoFrame));
+        vendorInfoFrame.Header.type = NVT_INFOFRAME_TYPE_VENDOR_SPECIFIC;
+        vendorInfoFrame.Header.version = 1;
+        vendorInfoFrame.Header.length = vsif->payloadSize;
+        ct_assert(sizeof(vendorInfoFrame.Data) >= sizeof(vsif->payload));
+        nvkms_memcpy(&vendorInfoFrame.Data, vsif->payload, vsif->payloadSize);
+        pDevEvo->hal->SendHdmiInfoFrame(pDispEvo, head,
+            NV_EVO_INFOFRAME_TRANSMIT_CONTROL_EVERY_FRAME,
+            &vendorInfoFrame.Header, sizeof(vendorInfoFrame.Header) + vsif->payloadSize,
+            TRUE);
+        return;
+    }
+
     /*
      * Disable the vendor specific infoframe if not requested to be
      * enabled, or if HDMI 3D is requested but not supported by the monitor.

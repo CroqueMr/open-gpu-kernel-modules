@@ -43,6 +43,7 @@ extern "C" {
 #include <ctrl/ctrl0073/ctrl0073dfp.h>
 
 #include "nvkms-api.h"
+#include "nvkms-cb1-vsif.h"
 #include "nvkms-prealloc-types.h"
 
 #include "nvos.h"
@@ -1933,6 +1934,7 @@ typedef struct _NVDispHeadStateEvoRec {
         enum NvKmsInfoFrameEOTF eotf;
         struct NvKmsHDRStaticMetadata staticMetadata;
     } hdrInfoFrameOverride;
+    struct NvKmsCb1Vsif hdmiVsifMetadata;
 
     struct {
         enum NvKmsHDRInfoFrameState state;
@@ -1982,6 +1984,7 @@ typedef struct _NVDispApiHeadStateEvoRec {
     enum NvKmsOutputTf tf;
 
     NvBool hdrInfoFrameOverride;
+    struct NvKmsCb1Vsif hdmiVsifMetadata;
     NvU32 hdrStaticMetadataLayerMask;
 
     /*

@@ -227,14 +227,86 @@ nv_drm_connector_detect(struct drm_connector *connector, bool force)
     return __nv_drm_connector_detect_internal(connector);
 }
 
+static struct nv_cb1_connector_state *nv_cb1_state(struct drm_connector_state *s)
+{
+    return container_of(s, struct nv_cb1_connector_state, base);
+}
+
+static void nv_cb1_destroy_state(struct drm_connector *c, struct drm_connector_state *s)
+{
+    drm_property_blob_put(nv_cb1_state(s)->vsif);
+    __drm_atomic_helper_connector_destroy_state(s);
+    nv_drm_free(nv_cb1_state(s));
+}
+
+static void nv_cb1_reset(struct drm_connector *c)
+{
+    struct nv_cb1_connector_state *s;
+    if (c->state) nv_cb1_destroy_state(c, c->state);
+    c->state = NULL;
+    s = nv_drm_calloc(1, sizeof(*s));
+    if (!s) return;
+    __drm_atomic_helper_connector_reset(c, &s->base);
+    s->base.max_requested_bpc = s->base.max_bpc = 12;
+}
+
+static struct drm_connector_state *nv_cb1_duplicate_state(struct drm_connector *c)
+{
+    struct nv_cb1_connector_state *s;
+    if (!c->state) return NULL;
+    s = nv_drm_calloc(1, sizeof(*s));
+    if (!s) return NULL;
+    __drm_atomic_helper_connector_duplicate_state(c, &s->base);
+    s->vsif = drm_property_blob_get(nv_cb1_state(c->state)->vsif);
+    s->dither_off = nv_cb1_state(c->state)->dither_off;
+    return &s->base;
+}
+
+static int nv_cb1_set_property(struct drm_connector *c, struct drm_connector_state *s,
+                              struct drm_property *p, uint64_t val)
+{
+    struct nv_drm_device *d = to_nv_device(c->dev);
+    struct nv_cb1_connector_state *ns = nv_cb1_state(s);
+    if (p == d->cb1_vsif_property) {
+        struct drm_property_blob *blob = val ? drm_property_lookup_blob(c->dev, val) : NULL;
+        if (val && !blob) return -EINVAL;
+        if (blob && (blob->length < 3 || blob->length > 27)) {
+            drm_property_blob_put(blob);
+            return -EINVAL;
+        }
+        drm_property_blob_put(ns->vsif);
+        ns->vsif = blob;
+        return 0;
+    }
+    if (p == d->cb1_dither_property) {
+        if (val > 1) return -EINVAL;
+        ns->dither_off = val == 1;
+        return 0;
+    }
+    return -EINVAL;
+}
+
+static int nv_cb1_get_property(struct drm_connector *c, const struct drm_connector_state *s,
+                              struct drm_property *p, uint64_t *val)
+{
+    struct nv_drm_device *d = to_nv_device(c->dev);
+    const struct nv_cb1_connector_state *ns = container_of(s, struct nv_cb1_connector_state, base);
+    if (p == d->cb1_vsif_property) *val = ns->vsif ? ns->vsif->base.id : 0;
+    else if (p == d->cb1_dither_property) *val = ns->dither_off;
+    else return -EINVAL;
+    return 0;
+}
+
 static struct drm_connector_funcs nv_connector_funcs = {
     .destroy                = nv_drm_connector_destroy,
-    .reset                  = drm_atomic_helper_connector_reset,
+    .reset                  = nv_cb1_reset,
     .force                  = __nv_drm_connector_force,
     .detect                 = nv_drm_connector_detect,
     .fill_modes             = drm_helper_probe_single_connector_modes,
-    .atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
-    .atomic_destroy_state   = drm_atomic_helper_connector_destroy_state,
+    .atomic_duplicate_state = nv_cb1_duplicate_state,
+    .atomic_destroy_state   = nv_cb1_destroy_state,
+    .atomic_set_property    = nv_cb1_set_property,
+    .atomic_get_property    = nv_cb1_get_property,
 };
 
 static int nv_drm_connector_get_modes(struct drm_connector *connector)
@@ -380,6 +452,24 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
     nv_crtc_state = to_nv_crtc_state(crtc_state);
     req_config = &nv_crtc_state->req_config;
 
+    {
+        const struct nv_cb1_connector_state *ns = nv_cb1_state(new_connector_state);
+        struct NvKmsCb1Vsif next = {0};
+        NvU32 bpc = 0;
+        if (ns->vsif) {
+            next.payloadSize = ns->vsif->length;
+            memcpy(next.payload, ns->vsif->data, next.payloadSize);
+        }
+        next.disableDithering = ns->dither_off;
+        if (connector->max_bpc_property && new_connector_state->max_requested_bpc < 10)
+            bpc = 8;
+        req_config->flags.hdmiVsifMetadataChanged =
+            memcmp(&req_config->modeSetConfig.hdmiVsifMetadata, &next, sizeof(next)) != 0;
+        req_config->modeSetConfig.hdmiVsifMetadata = next;
+        req_config->flags.colorBpcChanged = req_config->modeSetConfig.colorBpc != bpc;
+        req_config->modeSetConfig.colorBpc = bpc;
+    }
+
     /*
      * Override metadata for the entire head instead of allowing NVKMS to derive
      * it from the layers' metadata.
@@ -494,10 +584,12 @@ nv_drm_connector_new(struct drm_device *dev,
     }
 
     if ((nv_connector->base.state =
-            nv_drm_calloc(1, sizeof(*nv_connector->base.state))) == NULL) {
+            nv_drm_calloc(1, sizeof(struct nv_cb1_connector_state))) == NULL) {
         goto failed_state_alloc;
     }
     nv_connector->base.state->connector = &nv_connector->base;
+    nv_connector->base.state->max_requested_bpc = 12;
+    nv_connector->base.state->max_bpc = 12;
 
     nv_connector->physicalIndex = physicalIndex;
     nv_connector->type     = type;
@@ -531,6 +623,13 @@ nv_drm_connector_new(struct drm_device *dev,
 
 #if defined(NV_DRM_CONNECTOR_ATTACH_HDR_OUTPUT_METADATA_PROPERTY_PRESENT)
     if (nv_connector->type == NVKMS_CONNECTOR_TYPE_HDMI) {
+        nv_connector->base.max_bpc_property = nv_dev->cb1_bpc_property;
+        drm_object_attach_property(&nv_connector->base.base,
+            nv_dev->cb1_bpc_property, 12);
+        drm_object_attach_property(&nv_connector->base.base,
+            nv_dev->cb1_vsif_property, 0);
+        drm_object_attach_property(&nv_connector->base.base,
+            nv_dev->cb1_dither_property, 0);
 #if defined(NV_DRM_MODE_CREATE_DP_COLORSPACE_PROPERTY_HAS_SUPPORTED_COLORSPACES_ARG)
         if (drm_mode_create_hdmi_colorspace_property(
                 &nv_connector->base,
