@@ -48,6 +48,7 @@
 #include <linux/dma-fence.h>
 
 struct nv_drm_atomic_state {
+    bool cb1_prepared;
     struct NvKmsKapiRequestedModeSetConfig config;
     nv_drm_atomic_state_base_t base;
 };
@@ -75,6 +76,7 @@ nv_drm_atomic_state_alloc(struct drm_device *dev)
 
 void nv_drm_atomic_state_clear(nv_drm_atomic_state_base_t *state)
 {
+    to_nv_atomic_state(state)->cb1_prepared = false;
     nv_drm_atomic_state_base_default_clear(state);
 }
 
@@ -413,7 +415,7 @@ nv_drm_atomic_apply_modeset_config(struct drm_device *dev,
         return -EINVAL;
     }
 
-    if (commit) {
+    if (commit && !to_nv_atomic_state(state)->cb1_prepared) {
         /*
          * This function does what is necessary to prepare the framebuffers
          * attached to each new plane in the state for scan out, mostly by
@@ -521,6 +523,15 @@ int nv_drm_atomic_check(struct drm_device *dev,
     struct drm_crtc *crtc;
     struct drm_crtc_state *crtc_state;
     int i;
+    unsigned int primary_mask = 0;
+    struct drm_plane *plane;
+    struct drm_plane_state *plane_state;
+
+    /* Capture user-supplied primary transactions before helpers add planes. */
+    for_each_new_plane_in_state(state, plane, plane_state, i) {
+        if (plane->type == DRM_PLANE_TYPE_PRIMARY && plane_state->fb && plane_state->crtc)
+            primary_mask |= 1U << to_nv_crtc(plane_state->crtc)->head;
+    }
 
     for_each_new_crtc_in_state(state, crtc, crtc_state, i) {
         /*
@@ -538,6 +549,21 @@ int nv_drm_atomic_check(struct drm_device *dev,
         goto done;
     }
 
+    for_each_new_crtc_in_state(state, crtc, crtc_state, i) {
+        const struct NvKmsKapiHeadModeSetConfig *head =
+            &to_nv_crtc_state(crtc_state)->req_config.modeSetConfig;
+        if (head->hdr10plus.enabled) {
+            if (!(primary_mask & (1U << to_nv_crtc(crtc)->head)) || !crtc_state->active) {
+                ret = -EINVAL;
+                goto done;
+            }
+#if defined(NV_DRM_CRTC_STATE_HAS_ASYNC_FLIP)
+            if (crtc_state->async_flip) { ret = -EINVAL; goto done; }
+#elif defined(NV_DRM_CRTC_STATE_HAS_PAGEFLIP_FLAGS)
+            if (crtc_state->pageflip_flags & DRM_MODE_PAGE_FLIP_ASYNC) { ret = -EINVAL; goto done; }
+#endif
+        }
+    }
     ret = nv_drm_atomic_apply_modeset_config(dev,
                                              state, false /* commit */);
 
@@ -596,6 +622,23 @@ static void __nv_drm_handle_flip_event(struct nv_drm_crtc *nv_crtc)
     nv_drm_free(nv_flip);
 }
 
+static int nv_drm_cb1_ready_fences(nv_drm_atomic_state_base_t *state, bool nonblock)
+{
+    struct drm_plane *plane;
+    struct drm_plane_state *plane_state;
+    int i;
+    for_each_new_plane_in_state(state, plane, plane_state, i) {
+        long ready;
+        if (!plane_state->fence) continue;
+        ready = dma_fence_wait_timeout(plane_state->fence, false, nonblock ? 0 : 3 * HZ);
+        if (ready < 0) return ready;
+        if (ready == 0) return nonblock ? -EBUSY : -ETIMEDOUT;
+        ready = dma_fence_get_status(plane_state->fence);
+        if (ready < 0) return ready;
+    }
+    return 0;
+}
+
 int nv_drm_atomic_commit(struct drm_device *dev,
                          nv_drm_atomic_state_base_t *state,
                          bool nonblock)
@@ -606,6 +649,13 @@ int nv_drm_atomic_commit(struct drm_device *dev,
     struct drm_crtc *crtc = NULL;
     struct drm_crtc_state *crtc_state = NULL;
     struct nv_drm_device *nv_dev = to_nv_device(dev);
+    bool cb1_transaction = false;
+
+    for_each_new_crtc_in_state(state, crtc, crtc_state, i) {
+        if (to_nv_crtc_state(crtc_state)->req_config.modeSetConfig.hdr10plus.enabled ||
+            to_nv_crtc_state(crtc->state)->req_config.modeSetConfig.hdr10plus.enabled)
+            cb1_transaction = true;
+    }
 
     /*
      * XXX: drm_mode_config_funcs::atomic_commit() mandates to return -EBUSY
@@ -657,6 +707,7 @@ int nv_drm_atomic_commit(struct drm_device *dev,
                 NV_DRM_DEV_LOG_ERR(
                     nv_dev,
                     "Flip event timeout on head %u", nv_crtc->head);
+                if (cb1_transaction) return -EBUSY;
             }
         }
 
@@ -671,7 +722,7 @@ int nv_drm_atomic_commit(struct drm_device *dev,
 
             /* If checking the LUT notifier failed, assume no LUT notifier is set. */
             if (!complete) {
-                if (nonblock) {
+                if (nonblock || cb1_transaction) {
                     return -EBUSY;
                 } else {
                     /*
@@ -696,8 +747,22 @@ int nv_drm_atomic_commit(struct drm_device *dev,
      * expected.
      */
 
+    if (cb1_transaction) {
+        ret = drm_atomic_helper_prepare_planes(dev, state);
+        if (ret) return ret;
+        ret = nv_drm_cb1_ready_fences(state, nonblock);
+        if (ret) {
+            drm_atomic_helper_unprepare_planes(dev, state);
+            return ret;
+        }
+        to_nv_atomic_state(state)->cb1_prepared = true;
+    }
     ret = drm_atomic_helper_swap_state(state, false /* stall */);
     if (WARN_ON(ret != 0)) {
+        if (to_nv_atomic_state(state)->cb1_prepared) {
+            drm_atomic_helper_unprepare_planes(dev, state);
+            to_nv_atomic_state(state)->cb1_prepared = false;
+        }
         return ret;
     }
 
@@ -717,6 +782,17 @@ int nv_drm_atomic_commit(struct drm_device *dev,
     if ((ret = nv_drm_atomic_apply_modeset_config(
                     dev,
                     state, true /* commit */)) != 0) {
+        struct drm_crtc *affected;
+        struct drm_crtc_state *old;
+        int head_index;
+        /* State is already accepted. Never confirm an older packet as the
+         * failed new presentation, including a failed explicit clear. */
+        for_each_old_crtc_in_state(state, affected, old, head_index) {
+            if (to_nv_crtc_state(old)->req_config.modeSetConfig.hdr10plus.enabled ||
+                to_nv_crtc_state(affected->state)->req_config.modeSetConfig.hdr10plus.enabled) {
+                nvKms->markHdr10plusFault(nv_dev->pDevice, to_nv_crtc(affected)->head);
+            }
+        }
         NV_DRM_DEV_LOG_ERR(
             nv_dev,
             "Failed to apply atomic modeset.  Error code: %d",
@@ -804,6 +880,11 @@ int nv_drm_atomic_commit(struct drm_device *dev,
                 NV_DRM_DEV_LOG_ERR(
                     nv_dev,
                     "Flip event timeout on head %u", nv_crtc->head);
+                if (cb1_transaction) {
+                    /* A timed-out presentation is not a completed frame. */
+                    nvKms->markHdr10plusFault(nv_dev->pDevice, nv_crtc->head);
+                    continue;
+                }
                 while (!list_empty(&nv_crtc->flip_list)) {
                     __nv_drm_handle_flip_event(nv_crtc);
                 }
@@ -827,6 +908,7 @@ done:
     /*
      * State will be freed when the caller drops its reference after we return.
      */
+    to_nv_atomic_state(state)->cb1_prepared = false;
 
     return 0;
 }

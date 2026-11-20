@@ -44,6 +44,7 @@ extern "C" {
 
 #include "nvkms-api.h"
 #include "nvkms-cb1-vsif.h"
+#include "nvkms-cb1-hdr10plus.h"
 #include "nvkms-prealloc-types.h"
 
 #include "nvos.h"
@@ -1015,6 +1016,8 @@ enum NvKmsLUTState {
 
 /* Device-specific EVO state (subdevice- and channel-independent) */
 typedef struct _NVEvoDevRec {
+    /* Scoped by the existing NVKMS lock, only for a private kernel request. */
+    const struct NvKmsCb1Hdr10plus (*cb1Hdr10plusIntent)[NVKMS_MAX_HEADS_PER_DISP];
 
     NvU8                gpuLogIndex;
     NvU32               allocRefCnt; /* number of ALLOC_DEVICE calls */
@@ -1886,6 +1889,7 @@ typedef struct _NVHwHeadMultiTileConfigRec {
  * This structure stores information about the active per-head display state.
  */
 typedef struct _NVDispHeadStateEvoRec {
+    struct NvKmsCb1Hdr10plusOwner hdr10plus;
 
     NvU32 displayRate;
 

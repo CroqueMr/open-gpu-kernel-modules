@@ -655,6 +655,24 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
         if (!nv_dev->cb1_vsif_property || !nv_dev->cb1_bpc_property ||
             !nv_dev->cb1_dither_property) return -ENOMEM;
     }
+
+    /* Writes are refused by atomic_set_property; reads query current NVKMS. */
+    nv_dev->cb1_output_bpc_property = drm_property_create_range(nv_dev->dev,
+        0, "CB1_OUTPUT_BPC", 0, 16);
+    if (!nv_dev->cb1_output_bpc_property) {
+        return -ENOMEM;
+    }
+    {
+        static const struct drm_prop_enum_list status[] = {
+            {0, "disabled"}, {1, "active-commit-coupled"}, {2, "fault"}
+        };
+        nv_dev->cb1_hdr10plus_status_property = drm_property_create_enum(
+            nv_dev->dev, 0, "CB1_HDR10PLUS_STATUS", status, ARRAY_SIZE(status));
+        nv_dev->cb1_deep_color_property = drm_property_create_bool(nv_dev->dev,
+            0, "DVBRIDGE_HDR10_DEEP_COLOR");
+        if (!nv_dev->cb1_hdr10plus_status_property || !nv_dev->cb1_deep_color_property)
+            return -ENOMEM;
+    }
     return 0;
 }
 

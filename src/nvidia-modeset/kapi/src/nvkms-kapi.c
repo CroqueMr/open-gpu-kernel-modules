@@ -2524,6 +2524,75 @@ static void InitNvKmsModeValidationParams(
     params->overrides = NVKMS_MODE_VALIDATION_NO_RRX1K_CHECK;
 }
 
+/* Query accepted native output, never the requested framebuffer/max precision. */
+static NvU32 GetCurrentOutputBpc(struct NvKmsKapiDevice *device,
+                                 NvKmsKapiDisplay display, NvU32 head)
+{
+    struct NvKmsGetDpyAttributeParams params = { };
+
+    if (device == NULL) {
+        return 0;
+    }
+    params.request.deviceHandle = device->hKmsDevice;
+    params.request.dispHandle = device->hKmsDisp;
+    params.request.dpyId = nvNvU32ToDpyId(display);
+    params.request.attribute = NV_KMS_DPY_ATTRIBUTE_HEAD;
+    if (!nvkms_ioctl_from_kapi(device->pKmsOpen,
+            NVKMS_IOCTL_GET_DPY_ATTRIBUTE, &params, sizeof(params)) ||
+        params.reply.value != head) {
+        return 0;
+    }
+    params.request.attribute = NV_KMS_DPY_ATTRIBUTE_DPMS;
+    if (!nvkms_ioctl_from_kapi(device->pKmsOpen,
+            NVKMS_IOCTL_GET_DPY_ATTRIBUTE, &params, sizeof(params)) ||
+        params.reply.value != NV_KMS_DPY_ATTRIBUTE_DPMS_ON) {
+        return 0;
+    }
+    params.request.attribute = NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC;
+    if (!nvkms_ioctl_from_kapi(device->pKmsOpen,
+            NVKMS_IOCTL_GET_DPY_ATTRIBUTE, &params, sizeof(params))) {
+        return 0;
+    }
+    if (params.reply.value == 6 || params.reply.value == 8 ||
+        params.reply.value == 10 ||
+        (params.reply.value == 12 &&
+         NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC_MAX >= 12)) {
+        return (NvU32)params.reply.value;
+    }
+    return 0;
+}
+
+static NvU32 GetHdr10plusStatus(struct NvKmsKapiDevice *device,
+                                NvKmsKapiDisplay display, NvU32 head)
+{
+    struct NvKmsKapiHdr10plusStatus params = { };
+    if (device == NULL || GetCurrentOutputBpc(device, display, head) == 0) {
+        return 2;
+    }
+    params.deviceHandle = device->hKmsDevice;
+    params.disp = device->dispIdx;
+    params.head = head;
+    params.rmId = display;
+    params.status = 2;
+    if (!nvkms_ioctl_from_kapi(device->pKmsOpen,
+        NVKMS_IOCTL_KAPI_HDR10PLUS_STATUS, &params, sizeof(params))) {
+        return 2;
+    }
+    return params.status;
+}
+
+static void MarkHdr10plusFault(struct NvKmsKapiDevice *device, NvU32 head)
+{
+    struct NvKmsKapiHdr10plusStatus params = { };
+    if (device == NULL) return;
+    params.deviceHandle = device->hKmsDevice;
+    params.disp = device->dispIdx;
+    params.head = head;
+    params.latchFault = NV_TRUE;
+    nvkms_ioctl_from_kapi(device->pKmsOpen,
+        NVKMS_IOCTL_KAPI_HDR10PLUS_STATUS, &params, sizeof(params));
+}
+
 static int GetDisplayMode
 (
     struct NvKmsKapiDevice *device,
@@ -3328,6 +3397,10 @@ static NvBool GetOutputTransferFunction(
  * Helper function to convert NvKmsKapiRequestedModeSetConfig
  * to NvKmsSetModeParams.
  */
+static NvBool ConfigureCb1DeepOutput(
+    const struct NvKmsKapiHeadModeSetConfig *head,
+    struct NvKmsSetModeOneHeadRequest *request);
+
 static NvBool NvKmsKapiRequestedModeSetConfigToKms(
     struct NvKmsKapiDevice *device,
     const struct NvKmsKapiRequestedModeSetConfig *requestedConfig,
@@ -3468,6 +3541,10 @@ static NvBool NvKmsKapiRequestedModeSetConfigToKms(
             paramsHead->colorRange = NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_FULL;
         }
 
+        if (!ConfigureCb1DeepOutput(headModeSetConfig, paramsHead)) {
+            return NV_FALSE;
+        }
+
         paramsHead->viewPortSizeIn.width =
             headModeSetConfig->mode.timings.hVisible;
         paramsHead->viewPortSizeIn.height =
@@ -3480,6 +3557,28 @@ static NvBool NvKmsKapiRequestedModeSetConfigToKms(
     return NV_TRUE;
 }
 
+
+static NvBool ConfigureCb1DeepOutput(
+    const struct NvKmsKapiHeadModeSetConfig *head,
+    struct NvKmsSetModeOneHeadRequest *request)
+{
+    if (!head->strictDeepOutput && !head->hdr10plus.enabled) {
+        return NV_TRUE;
+    }
+    if (head->colorBpc < 10 || head->numDisplays != 1 || !head->bActive ||
+        !head->hdrInfoFrame.enabled ||
+        head->hdrInfoFrame.eotf != NVKMS_INFOFRAME_EOTF_ST2084 ||
+        head->colorimetry != NVKMS_OUTPUT_COLORIMETRY_BT2100 ||
+        head->hdmiVsifMetadata.payloadSize != 0) {
+        return NV_FALSE;
+    }
+    /* Pascal has native 422-10, not the newer RGB10/12 output policy. */
+    request->colorSpaceSpecified = NV_TRUE;
+    request->colorSpace = NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_SPACE_YCbCr422;
+    request->colorBpcSpecified = NV_TRUE;
+    request->colorBpc = 10;
+    return NV_TRUE;
+}
 
 static NvBool KmsSetMode(
     struct NvKmsKapiDevice *device,
@@ -3508,6 +3607,10 @@ static NvBool KmsSetMode(
         for (NvU32 head = 0; head < NVKMS_KAPI_MAX_HEADS; head++) {
             extended->vsif[device->dispIdx][head] =
                 requestedConfig->headRequestedConfig[head].modeSetConfig.hdmiVsifMetadata;
+            extended->hdr10plus[device->dispIdx][head] =
+                requestedConfig->headRequestedConfig[head].modeSetConfig.hdr10plus;
+            extended->hdr10plus[device->dispIdx][head].strictDeepOutput =
+                requestedConfig->headRequestedConfig[head].modeSetConfig.strictDeepOutput;
         }
         status = nvkms_ioctl_from_kapi_try_pmlock(device->pKmsOpen,
             NVKMS_IOCTL_KAPI_SET_MODE_VSIF, extended, sizeof(*extended));
@@ -3608,14 +3711,15 @@ static NvBool KmsFlip(
     /* Allocate space for the params structure, plus space for each possible
      * head. */
     params = nvKmsKapiCalloc(1,
-            sizeof(*params) + sizeof(pFlipHead[0]) * NVKMS_KAPI_MAX_HEADS);
+            sizeof(struct NvKmsKapiFlipHdr10plus) +
+            sizeof(pFlipHead[0]) * NVKMS_KAPI_MAX_HEADS);
 
     if (params == NULL) {
         return NV_FALSE;
     }
 
     /* The flipHead array was allocated in the same block above. */
-    pFlipHead = (struct NvKmsFlipRequestOneHead *)(params + 1);
+    pFlipHead = (void *)((struct NvKmsKapiFlipHdr10plus *)params + 1);
 
     params->request.deviceHandle = device->hKmsDevice;
     params->request.commit = commit;
@@ -3735,9 +3839,17 @@ static NvBool KmsFlip(
         goto done;
     }
 
-    status = nvkms_ioctl_from_kapi_try_pmlock(device->pKmsOpen,
-                                              NVKMS_IOCTL_FLIP,
-                                              params, sizeof(*params));
+    {
+        struct NvKmsKapiFlipHdr10plus *extended = (void *)params;
+        for (head = 0; head < NVKMS_KAPI_MAX_HEADS; head++) {
+            extended->hdr10plus[0][head] =
+                requestedConfig->headRequestedConfig[head].modeSetConfig.hdr10plus;
+            extended->hdr10plus[0][head].strictDeepOutput =
+                requestedConfig->headRequestedConfig[head].modeSetConfig.strictDeepOutput;
+        }
+        status = nvkms_ioctl_from_kapi_try_pmlock(device->pKmsOpen,
+            NVKMS_IOCTL_KAPI_FLIP_HDR10PLUS, extended, sizeof(*extended));
+    }
 
     replyConfig->flipResult = params->reply.flipResult;
 
@@ -4148,6 +4260,9 @@ NvBool nvKmsKapiGetFunctionsTableInternal
     funcsTable->destroySurface = DestroySurface;
 
     funcsTable->getDisplayMode      = GetDisplayMode;
+    funcsTable->getCurrentOutputBpc = GetCurrentOutputBpc;
+    funcsTable->getHdr10plusStatus = GetHdr10plusStatus;
+    funcsTable->markHdr10plusFault = MarkHdr10plusFault;
     funcsTable->validateDisplayMode = ValidateDisplayMode;
 
     funcsTable->applyModeSetConfig   = ApplyModeSetConfig;
