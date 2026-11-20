@@ -43,6 +43,14 @@ void nvSendHdmiCapsToRm(NVDpyEvoPtr pDpyEvo);
 void nvLogEdidCea861InfoEvo(NVDpyEvoPtr pDpyEvo,
                             NVEvoInfoStringPtr pInfoString);
 NvBool nvDpyIsHdmiEvo(const NVDpyEvoRec *pDpyEvo);
+NvBool nvCb1Hdr10plusRoute(const NVDispEvoRec *disp, NvU32 apiHead,
+    NVDpyIdList dpys, const NVDpyAttributeColor *color,
+    const NVDispHeadInfoFrameStateEvoRec *info,
+    const struct NvKmsCb1Vsif *vsif, NvBool vrr);
+void nvCb1CommitHdr10plus(NVDispEvoRec *disp, NvU32 head,
+    const struct NvKmsCb1Hdr10plus *intent, NvBool commit);
+NvU32 nvCb1Hdr10plusStatus(NVDispEvoRec *disp, NvU32 head,
+                          NvU32 rmId, NvBool latchFault);
 NvBool nvDpyIsHdmiDepth30Evo(const NVDpyEvoRec *pDpyEvo);
 
 NvBool nvHdmi204k60HzRGB444Allowed(const NVDpyEvoRec *pDpyEvo,

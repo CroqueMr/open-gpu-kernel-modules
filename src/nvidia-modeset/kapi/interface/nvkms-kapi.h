@@ -29,6 +29,8 @@
 #include "nv-gpu-info.h"
 #include "nv_dpy_id.h"
 #include "nvkms-api-types.h"
+#include "nvkms-cb1-vsif.h"
+#include "nvkms-cb1-hdr10plus.h"
 #include "nvkms-format.h"
 
 #define __NVKMS_KAPI_H__
@@ -412,6 +414,10 @@ struct NvKmsKapiHeadModeSetConfig {
     } olut;
 
     NvU32 olutFpNormScale;
+    struct NvKmsCb1Vsif hdmiVsifMetadata;
+    NvU32 colorBpc;
+    NvBool strictDeepOutput;
+    struct NvKmsCb1Hdr10plus hdr10plus;
 };
 
 struct NvKmsKapiHeadRequestedConfig {
@@ -426,6 +432,8 @@ struct NvKmsKapiHeadRequestedConfig {
         NvBool legacyOlutChanged      : 1;
         NvBool olutChanged            : 1;
         NvBool olutFpNormScaleChanged : 1;
+        NvBool hdmiVsifMetadataChanged : 1;
+        NvBool colorBpcChanged : 1;
     } flags;
 
     struct NvKmsKapiCursorRequestedConfig cursorRequestedConfig;
@@ -1606,6 +1614,12 @@ struct NvKmsKapiFunctionsTable {
     (
         struct NvKmsKapiDevice *device
     );
+    /* Kernel-client-only diagnostic; appended to preserve preceding offsets. */
+    NvU32 (*getCurrentOutputBpc)(struct NvKmsKapiDevice *device,
+                                NvKmsKapiDisplay display, NvU32 head);
+    NvU32 (*getHdr10plusStatus)(struct NvKmsKapiDevice *device,
+                               NvKmsKapiDisplay display, NvU32 head);
+    void (*markHdr10plusFault)(struct NvKmsKapiDevice *device, NvU32 head);
 };
 
 /** @} */

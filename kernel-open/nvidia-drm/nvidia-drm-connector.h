@@ -45,7 +45,7 @@ struct nv_drm_connector {
     char dpAddress[NVKMS_DP_ADDRESS_STRING_LENGTH];
 
     struct nv_drm_encoder *nv_detected_encoder;
-    struct edid *edid;
+    const struct drm_edid *edid;
 
     atomic_t connection_status_dirty;
 
@@ -74,6 +74,13 @@ static inline struct nv_drm_connector *to_nv_connector(
     }
     return container_of(connector, struct nv_drm_connector, base);
 }
+
+struct nv_cb1_connector_state {
+    struct drm_connector_state base;
+    struct drm_property_blob *vsif;
+    bool dither_off;
+    bool strict_deep_color;
+};
 
 static inline void nv_drm_connector_mark_connection_status_dirty(
     struct nv_drm_connector *nv_connector)

@@ -27,6 +27,7 @@
 #include "nvidia-drm-helper.h"
 #include "nvidia-drm-priv.h"
 #include "nvidia-drm-connector.h"
+#include <drm/drm_hdr10plus.h>
 #include "nvidia-drm-crtc.h"
 #include "nvidia-drm-utils.h"
 #include "nvidia-drm-encoder.h"
@@ -45,6 +46,22 @@
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_edid.h>
 
+static bool nv_drm_connector_hdmi_properties(const struct nv_drm_connector *c)
+{
+    return c->type == NVKMS_CONNECTOR_TYPE_HDMI ||
+        (c->type == NVKMS_CONNECTOR_TYPE_DP && !c->internal && !c->dpAddress[0]);
+}
+
+static bool nv_drm_connector_dual_tmds(struct drm_connector *connector,
+                                      const struct nv_drm_encoder *encoder)
+{
+    const struct nv_drm_connector *c = to_nv_connector(connector);
+    return connector->status == connector_status_connected &&
+        c->type == NVKMS_CONNECTOR_TYPE_DP && nv_drm_connector_hdmi_properties(c) &&
+        encoder && encoder == c->nv_detected_encoder &&
+        encoder->signal_format == NVKMS_CONNECTOR_SIGNAL_FORMAT_TMDS;
+}
+
 static void nv_drm_connector_destroy(struct drm_connector *connector)
 {
     struct nv_drm_connector *nv_connector = to_nv_connector(connector);
@@ -54,7 +71,7 @@ static void nv_drm_connector_destroy(struct drm_connector *connector)
     drm_connector_cleanup(connector);
 
     if (nv_connector->edid != NULL) {
-        nv_drm_free(nv_connector->edid);
+        drm_edid_free(nv_connector->edid);
     }
 
     nv_drm_free(nv_connector);
@@ -130,18 +147,17 @@ __nv_drm_detect_encoder(struct NvKmsKapiDynamicDisplayParams *pDetectParams,
 #endif
 
     if (pDetectParams->connected) {
-        if (!pDetectParams->overrideEdid && pDetectParams->edid.bufferSize) {
-
-            if ((nv_connector->edid = nv_drm_calloc(
-                        1,
-                        pDetectParams->edid.bufferSize)) != NULL) {
-
-                memcpy(nv_connector->edid,
-                       pDetectParams->edid.buffer,
-                       pDetectParams->edid.bufferSize);
-            } else {
-                NV_DRM_LOG_ERR("Out of Memory");
+        NvU32 size = pDetectParams->edid.bufferSize;
+        if (size >= EDID_LENGTH && size <= sizeof(pDetectParams->edid.buffer) &&
+            size % EDID_LENGTH == 0) {
+            nv_connector->edid = drm_edid_alloc(pDetectParams->edid.buffer, size);
+            if (!drm_edid_valid(nv_connector->edid)) {
+                drm_edid_free(nv_connector->edid);
+                nv_connector->edid = NULL;
+                NV_DRM_LOG_ERR("Invalid or unavailable EDID; retaining native modes only");
             }
+        } else if (size) {
+            NV_DRM_LOG_ERR("Invalid EDID length %u; retaining native modes only", size);
         }
 
         return true;
@@ -167,7 +183,7 @@ static enum drm_connector_status __nv_drm_connector_detect_internal(
     BUG_ON(!mutex_is_locked(&dev->mode_config.mutex));
 
     if (nv_connector->edid != NULL) {
-        nv_drm_free(nv_connector->edid);
+        drm_edid_free(nv_connector->edid);
         nv_connector->edid = NULL;
     }
 
@@ -227,14 +243,129 @@ nv_drm_connector_detect(struct drm_connector *connector, bool force)
     return __nv_drm_connector_detect_internal(connector);
 }
 
+static struct nv_cb1_connector_state *nv_cb1_state(struct drm_connector_state *s)
+{
+    return container_of(s, struct nv_cb1_connector_state, base);
+}
+
+static void nv_cb1_destroy_state(struct drm_connector *c, struct drm_connector_state *s)
+{
+    drm_property_blob_put(nv_cb1_state(s)->vsif);
+    __drm_atomic_helper_connector_destroy_state(s);
+    nv_drm_free(nv_cb1_state(s));
+}
+
+static void nv_cb1_reset(struct drm_connector *c)
+{
+    struct nv_cb1_connector_state *s;
+    if (c->state) nv_cb1_destroy_state(c, c->state);
+    c->state = NULL;
+    s = nv_drm_calloc(1, sizeof(*s));
+    if (!s) return;
+    __drm_atomic_helper_connector_reset(c, &s->base);
+    s->base.max_requested_bpc = s->base.max_bpc = 12;
+}
+
+static struct drm_connector_state *nv_cb1_duplicate_state(struct drm_connector *c)
+{
+    struct nv_cb1_connector_state *s;
+    if (!c->state) return NULL;
+    s = nv_drm_calloc(1, sizeof(*s));
+    if (!s) return NULL;
+    __drm_atomic_helper_connector_duplicate_state(c, &s->base);
+    s->vsif = drm_property_blob_get(nv_cb1_state(c->state)->vsif);
+    s->dither_off = nv_cb1_state(c->state)->dither_off;
+    s->strict_deep_color = nv_cb1_state(c->state)->strict_deep_color;
+    return &s->base;
+}
+
+static int nv_cb1_set_property(struct drm_connector *c, struct drm_connector_state *s,
+                              struct drm_property *p, uint64_t val)
+{
+    struct nv_drm_device *d = to_nv_device(c->dev);
+    struct nv_cb1_connector_state *ns = nv_cb1_state(s);
+    if (p == d->cb1_vsif_property) {
+        struct drm_property_blob *blob = val ? drm_property_lookup_blob(c->dev, val) : NULL;
+        if (val && !blob) return -EINVAL;
+        if (blob && (blob->length < 3 || blob->length > 27)) {
+            drm_property_blob_put(blob);
+            return -EINVAL;
+        }
+        drm_property_blob_put(ns->vsif);
+        ns->vsif = blob;
+        return 0;
+    }
+    if (p == d->cb1_dither_property) {
+        if (val > 1) return -EINVAL;
+        ns->dither_off = val == 1;
+        return 0;
+    }
+    if (p == d->cb1_deep_color_property) {
+        if (val > 1) return -EINVAL;
+        ns->strict_deep_color = val;
+        return 0;
+    }
+    return -EINVAL;
+}
+
+/* Logical read-only property: IMMUTABLE would bypass this live getter. */
+static NvU32 nv_drm_connector_current_output_bpc(
+    struct drm_connector *connector, const struct drm_connector_state *state)
+{
+    struct nv_drm_device *nv_dev = to_nv_device(connector->dev);
+    if (connector->status != connector_status_connected ||
+        !state->crtc || !state->best_encoder || !state->crtc->state->active) {
+        return 0;
+    }
+    return nvKms->getCurrentOutputBpc(nv_dev->pDevice,
+        to_nv_encoder(state->best_encoder)->hDisplay,
+        to_nv_crtc(state->crtc)->head);
+}
+
+static int nv_cb1_get_property(struct drm_connector *c, const struct drm_connector_state *s,
+                              struct drm_property *p, uint64_t *val)
+{
+    struct nv_drm_device *d = to_nv_device(c->dev);
+    const struct nv_cb1_connector_state *ns = container_of(s, struct nv_cb1_connector_state, base);
+    if (p == d->cb1_native_tmds_property) {
+        *val = nv_drm_connector_dual_tmds(c, to_nv_connector(c)->nv_detected_encoder);
+        return 0;
+    }
+    if (p == d->cb1_hdr10plus_status_property) {
+        if (c->status != connector_status_connected || !s->crtc ||
+            !s->best_encoder || !s->crtc->state->active) {
+            *val = 2;
+        } else {
+            *val = nvKms->getHdr10plusStatus(d->pDevice,
+                to_nv_encoder(s->best_encoder)->hDisplay,
+                to_nv_crtc(s->crtc)->head);
+        }
+        return 0;
+    }
+    if (p == d->cb1_deep_color_property) {
+        *val = ns->strict_deep_color;
+        return 0;
+    }
+    if (p == d->cb1_output_bpc_property) {
+        *val = nv_drm_connector_current_output_bpc(c, s);
+        return 0;
+    }
+    if (p == d->cb1_vsif_property) *val = ns->vsif ? ns->vsif->base.id : 0;
+    else if (p == d->cb1_dither_property) *val = ns->dither_off;
+    else return -EINVAL;
+    return 0;
+}
+
 static struct drm_connector_funcs nv_connector_funcs = {
     .destroy                = nv_drm_connector_destroy,
-    .reset                  = drm_atomic_helper_connector_reset,
+    .reset                  = nv_cb1_reset,
     .force                  = __nv_drm_connector_force,
     .detect                 = nv_drm_connector_detect,
     .fill_modes             = drm_helper_probe_single_connector_modes,
-    .atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
-    .atomic_destroy_state   = drm_atomic_helper_connector_destroy_state,
+    .atomic_duplicate_state = nv_cb1_duplicate_state,
+    .atomic_destroy_state   = nv_cb1_destroy_state,
+    .atomic_set_property    = nv_cb1_set_property,
+    .atomic_get_property    = nv_cb1_get_property,
 };
 
 static int nv_drm_connector_get_modes(struct drm_connector *connector)
@@ -248,8 +379,9 @@ static int nv_drm_connector_get_modes(struct drm_connector *connector)
     int   count = 0;
 
 
-    if (nv_connector->edid != NULL) {
-        nv_drm_connector_update_edid_property(connector, nv_connector->edid);
+    if (drm_edid_connector_update(connector, nv_connector->edid) < 0) {
+        NV_DRM_LOG_ERR("Failed to publish EDID capabilities");
+        drm_edid_connector_update(connector, NULL);
     }
 
     while (1) {
@@ -372,13 +504,52 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
     struct nv_drm_crtc_state *nv_crtc_state;
     struct NvKmsKapiHeadRequestedConfig *req_config;
 
+    if (drm_connector_check_hdr10plus(new_connector_state)) return -EINVAL;
+
     if (!crtc) {
         return 0;
     }
 
+    if (to_nv_connector(connector)->type != NVKMS_CONNECTOR_TYPE_HDMI &&
+        (nv_cb1_state(new_connector_state)->vsif || new_connector_state->hdr10plus_metadata) &&
+        !nv_drm_connector_dual_tmds(connector, to_nv_encoder(new_connector_state->best_encoder)))
+        return -EINVAL;
+
     crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
     nv_crtc_state = to_nv_crtc_state(crtc_state);
     req_config = &nv_crtc_state->req_config;
+
+    {
+        const struct nv_cb1_connector_state *ns = nv_cb1_state(new_connector_state);
+        struct NvKmsCb1Vsif next = {0};
+        NvU32 bpc = 0;
+        bool strict = ns->strict_deep_color || new_connector_state->hdr10plus_metadata;
+        if (ns->vsif) {
+            next.payloadSize = ns->vsif->length;
+            memcpy(next.payload, ns->vsif->data, next.payloadSize);
+        }
+        next.disableDithering = ns->dither_off;
+        if (connector->max_bpc_property && new_connector_state->max_requested_bpc < 10)
+            bpc = 8;
+        else if (strict)
+            bpc = 10;
+        req_config->modeSetConfig.hdr10plus.specified = NV_TRUE;
+        req_config->modeSetConfig.hdr10plus.enabled =
+            new_connector_state->hdr10plus_metadata != NULL;
+        if (new_connector_state->hdr10plus_metadata) {
+            if (!drm_hdr10plus_infoframe_valid(new_connector_state->hdr10plus_metadata->data,
+                    new_connector_state->hdr10plus_metadata->length) ||
+                ns->vsif || !crtc_state->active || crtc_state->vrr_enabled) return -EINVAL;
+            memcpy(req_config->modeSetConfig.hdr10plus.packet,
+                new_connector_state->hdr10plus_metadata->data, 31);
+        }
+        req_config->modeSetConfig.strictDeepOutput = strict;
+        req_config->flags.hdmiVsifMetadataChanged =
+            memcmp(&req_config->modeSetConfig.hdmiVsifMetadata, &next, sizeof(next)) != 0;
+        req_config->modeSetConfig.hdmiVsifMetadata = next;
+        req_config->flags.colorBpcChanged = req_config->modeSetConfig.colorBpc != bpc;
+        req_config->modeSetConfig.colorBpc = bpc;
+    }
 
     /*
      * Override metadata for the entire head instead of allowing NVKMS to derive
@@ -494,10 +665,12 @@ nv_drm_connector_new(struct drm_device *dev,
     }
 
     if ((nv_connector->base.state =
-            nv_drm_calloc(1, sizeof(*nv_connector->base.state))) == NULL) {
+            nv_drm_calloc(1, sizeof(struct nv_cb1_connector_state))) == NULL) {
         goto failed_state_alloc;
     }
     nv_connector->base.state->connector = &nv_connector->base;
+    nv_connector->base.state->max_requested_bpc = 12;
+    nv_connector->base.state->max_bpc = 12;
 
     nv_connector->physicalIndex = physicalIndex;
     nv_connector->type     = type;
@@ -530,7 +703,24 @@ nv_drm_connector_new(struct drm_device *dev,
     }
 
 #if defined(NV_DRM_CONNECTOR_ATTACH_HDR_OUTPUT_METADATA_PROPERTY_PRESENT)
-    if (nv_connector->type == NVKMS_CONNECTOR_TYPE_HDMI) {
+    if (nv_drm_connector_hdmi_properties(nv_connector)) {
+        if (nv_connector->type == NVKMS_CONNECTOR_TYPE_DP)
+            drm_object_attach_property(&nv_connector->base.base,
+                                       nv_dev->cb1_native_tmds_property, 0);
+        drm_connector_attach_hdr10plus_metadata_property(&nv_connector->base);
+        drm_object_attach_property(&nv_connector->base.base,
+            nv_dev->cb1_hdr10plus_status_property, 0);
+        drm_object_attach_property(&nv_connector->base.base,
+            nv_dev->cb1_deep_color_property, 0);
+        drm_object_attach_property(&nv_connector->base.base,
+                                   nv_dev->cb1_output_bpc_property, 0);
+        nv_connector->base.max_bpc_property = nv_dev->cb1_bpc_property;
+        drm_object_attach_property(&nv_connector->base.base,
+            nv_dev->cb1_bpc_property, 12);
+        drm_object_attach_property(&nv_connector->base.base,
+            nv_dev->cb1_vsif_property, 0);
+        drm_object_attach_property(&nv_connector->base.base,
+            nv_dev->cb1_dither_property, 0);
 #if defined(NV_DRM_MODE_CREATE_DP_COLORSPACE_PROPERTY_HAS_SUPPORTED_COLORSPACES_ARG)
         if (drm_mode_create_hdmi_colorspace_property(
                 &nv_connector->base,
@@ -542,6 +732,8 @@ nv_drm_connector_new(struct drm_device *dev,
         }
         drm_connector_attach_hdr_output_metadata_property(&nv_connector->base);
     } else if (nv_connector->type == NVKMS_CONNECTOR_TYPE_DP) {
+        drm_object_attach_property(&nv_connector->base.base,
+                                   nv_dev->cb1_output_bpc_property, 0);
 #if defined(NV_DRM_MODE_CREATE_DP_COLORSPACE_PROPERTY_HAS_SUPPORTED_COLORSPACES_ARG)
         if (drm_mode_create_dp_colorspace_property(
                 &nv_connector->base,

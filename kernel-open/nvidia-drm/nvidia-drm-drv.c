@@ -644,6 +644,38 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
         return -ENOMEM;
     }
 
+    {
+        static const struct drm_prop_enum_list dither[] = {{0, "auto"}, {1, "off"}};
+        nv_dev->cb1_vsif_property = drm_property_create(nv_dev->dev,
+            DRM_MODE_PROP_BLOB, "NV_HDMI_VSIF_METADATA", 0);
+        nv_dev->cb1_bpc_property = drm_property_create_range(nv_dev->dev,
+            0, "max bpc", 8, 12);
+        nv_dev->cb1_dither_property = drm_property_create_enum(nv_dev->dev,
+            0, "dithering mode", dither, ARRAY_SIZE(dither));
+        if (!nv_dev->cb1_vsif_property || !nv_dev->cb1_bpc_property ||
+            !nv_dev->cb1_dither_property) return -ENOMEM;
+    }
+
+    /* Writes are refused by atomic_set_property; reads query current NVKMS. */
+    nv_dev->cb1_native_tmds_property = drm_property_create_bool(nv_dev->dev,
+        0, "CB1_NATIVE_TMDS");
+    if (!nv_dev->cb1_native_tmds_property) return -ENOMEM;
+    nv_dev->cb1_output_bpc_property = drm_property_create_range(nv_dev->dev,
+        0, "CB1_OUTPUT_BPC", 0, 16);
+    if (!nv_dev->cb1_output_bpc_property) {
+        return -ENOMEM;
+    }
+    {
+        static const struct drm_prop_enum_list status[] = {
+            {0, "disabled"}, {1, "active-commit-coupled"}, {2, "fault"}
+        };
+        nv_dev->cb1_hdr10plus_status_property = drm_property_create_enum(
+            nv_dev->dev, 0, "CB1_HDR10PLUS_STATUS", status, ARRAY_SIZE(status));
+        nv_dev->cb1_deep_color_property = drm_property_create_bool(nv_dev->dev,
+            0, "DVBRIDGE_HDR10_DEEP_COLOR");
+        if (!nv_dev->cb1_hdr10plus_status_property || !nv_dev->cb1_deep_color_property)
+            return -ENOMEM;
+    }
     return 0;
 }
 

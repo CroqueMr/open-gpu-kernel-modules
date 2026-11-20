@@ -863,6 +863,100 @@ static void parseEdidLongDisplayDescriptor(EDID_LONG_DISPLAY_DESCRIPTOR *descrip
 
 }
 
+/*
+ * The timings of CTA-861 and of the HDMI 1.4b vendor-specific data block come from tables of this
+ * library that give each format of an integer multiple of 6 Hz at its 1000/1001 rate only (23.976,
+ * 29.97, 47.952, 59.94, 119.88 and 239.76 Hz). The same video identification code also stands for
+ * the integer rate (CTA-861: a format whose vertical frequency is an integer multiple of 6 Hz may be
+ * sent at that frequency or at 1000/1001 of it, and a sink that declares the format takes both), and
+ * the drivers that use the EDID code of the Linux kernel list both. So a display that declares
+ * 3840x2160 at 24 Hz (VIC 93, HDMI VIC 3) was offered 23.976 Hz only, and a video of exactly 24
+ * frames per second had no mode at its rate, nor one at 30 or 120 Hz at that size.
+ *
+ * Add the integer-rate twin of each such progressive timing, with the same code, after the timings
+ * that the EDID gave, unless an equal timing is there already. One that the EDID gave stands for
+ * that rate whatever its kind (a detailed or a standard timing, HDMI VIC 4), and the rate is left as
+ * it was. A twin added here stands only for its own kind and code: the CTA-861 and the HDMI 1.4b
+ * twins of a format, and those of two codes of one timing (VICs 2 and 3, 4:3 and 16:9), are all
+ * kept, as the timings at the 1000/1001 rate are, and in their order. NVKMS takes the CTA-861 one
+ * first where the display prefers those (UHD_VIC), and sends a mode that it finds as an HDMI 1.4b
+ * timing only with AVI VIC 0 and the HDMI vendor-specific InfoFrame: so a format whose integer rate
+ * the EDID did not give itself goes out with the same InfoFrames at both rates. Nothing that was listed changes, and its order neither.
+ * Interlaced timings are left out, as NVKMS does not take them, and so are the OVT timings of a
+ * video format data block, which are computed at their own rates.
+ */
+CODE_SEGMENT(PAGE_DD_CODE)
+static void addEdidIntegerRateTwins(NVT_EDID_INFO *pInfo)
+{
+    const NvU32 count = pInfo->total_timings;
+    NvU32 i, j;
+
+    for (i = 0; i < count; i++)
+    {
+        const NVT_TIMING *pT = &pInfo->timing[i];
+        const NvU32 type = NVT_GET_TIMING_STATUS_TYPE(pT->etc.status);
+        NVT_TIMING twin;
+        NvU32 rr;
+        NvBool present = NV_FALSE;
+
+        if ((type != NVT_TYPE_EDID_861ST && type != NVT_TYPE_HDMI_EXT) || pT->interlaced ||
+            (pT->etc.flag & (NVT_FLAG_CTA_OVT_TIMING | NVT_FLAG_CTA_OVT_FRR_TIMING)))
+        {
+            continue;
+        }
+
+        // the 1000/1001 rate of an integer rate that is a multiple of 6 Hz, to the mHz of the tables
+        rr = (pT->etc.rrx1k + 500) / 1000;
+        if (rr == 0 || (rr % 6) != 0 || pT->etc.rrx1k != (rr * 1000000 + 500) / 1001)
+        {
+            continue;
+        }
+
+        twin = *pT;
+        twin.etc.rrx1k = rr * 1000;
+        twin.etc.rr = (NvU16)rr;
+        twin.pclk = RRx1kToPclk(&twin);
+        twin.pclk1khz = RRx1kToPclk1khz(&twin);
+
+        for (j = 0; j < pInfo->total_timings; j++)
+        {
+            if ((j < count ||
+                 (NVT_GET_TIMING_STATUS_TYPE(pInfo->timing[j].etc.status) == type &&
+                  NVT_GET_TIMING_STATUS_SEQ(pInfo->timing[j].etc.status) ==
+                      NVT_GET_TIMING_STATUS_SEQ(twin.etc.status))) &&
+                NvTiming_IsTimingRelaxedEqualEx(&pInfo->timing[j], &twin))
+            {
+                present = NV_TRUE;
+                break;
+            }
+        }
+        if (present)
+        {
+            continue;
+        }
+
+        if (type == NVT_TYPE_EDID_861ST)
+        {
+            NVT_SNPRINTF((char *)twin.etc.name, sizeof(twin.etc.name),
+                         "CTA-861G:#%3d:%5dx%4dx%3d.%03dHz/P",
+                         (int)NVT_GET_TIMING_STATUS_SEQ(twin.etc.status),
+                         (int)twin.HVisible, (int)twin.VVisible, (int)rr, 0);
+        }
+        else
+        {
+            NVT_SNPRINTF((char *)twin.etc.name, sizeof(twin.etc.name),
+                         "HDMI EXT: %dx%dx%dhz",
+                         (int)twin.HVisible, (int)twin.VVisible, (int)rr);
+        }
+        twin.etc.name[sizeof(twin.etc.name) - 1] = '\0';
+
+        if (!assignNextAvailableTiming(pInfo, &twin))
+        {
+            break;
+        }
+    }
+}
+
 // get generic EDID info
 CODE_SEGMENT(PAGE_DD_CODE)
 NVT_STATUS NV_STDCALL NvTiming_ParseEDIDInfo(NvU8 *pEdid, NvU32 length, NVT_EDID_INFO *pInfo)
@@ -1203,6 +1297,8 @@ NVT_STATUS NV_STDCALL NvTiming_ParseEDIDInfo(NvU8 *pEdid, NvU32 length, NVT_EDID
 #if defined(NVT_USE_NVKMS)
     prioritizeEdidHDMIExtTiming(pInfo);
 #endif
+
+    addEdidIntegerRateTwins(pInfo);
 
     // Assert if no timings were found (due to a bad EDID) or if we mistakenly
     // assigned more timings than we allocated space for (due to bad logic above)
