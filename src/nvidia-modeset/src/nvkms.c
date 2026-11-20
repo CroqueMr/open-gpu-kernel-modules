@@ -31,6 +31,7 @@
 #include "nvkms-utils.h"
 #include "nvkms-console-restore.h"
 #include "nvkms-dpy.h"
+#include "nvkms-dv-vsif.h"
 #include "nvkms-dma.h"
 #include "nvkms-evo.h"
 #include "nvkms-rm.h"
@@ -353,6 +354,46 @@ static struct NvKmsPerOpenConnector *GetPerOpenConnector(
                                         connectorHandle);
 }
 
+
+/* Native 422-10 needs both the display engine CSC and the receiver format. */
+static NvBool Cb1NativeLldv422(const NVDpyEvoRec *dpy)
+{
+    NvKmsDpyOutputColorFormatInfo formats;
+    if (!nvDpyIsHdmiEvo(dpy) || nvDpyUsesDPLib(dpy) ||
+        dpy->pConnectorEvo->signalFormat != NVKMS_CONNECTOR_SIGNAL_FORMAT_TMDS ||
+        !dpy->pDispEvo->pDevEvo->caps.supportsYUV2020 ||
+        dpy->pDispEvo->pDevEvo->caps.hdmiYCbCr422MaxBpc < 10)
+        return FALSE;
+    formats = nvDpyGetOutputColorFormatInfo(dpy);
+    return formats.yuv422.minBpc <= 10 && formats.yuv422.maxBpc >= 10;
+}
+
+/* Read the programmed NVKMS owners, never the swapped DRM request. */
+static NvBool Cb1NativeLldvActive(const NVDpyEvoRec *dpy, NvU32 apiHead)
+{
+    const NVDispEvoRec *disp = dpy->pDispEvo;
+    const NVDispApiHeadStateEvoRec *api;
+    const NVDispHeadStateEvoRec *hw;
+    if (apiHead >= disp->pDevEvo->numApiHeads || dpy->apiHead != apiHead)
+        return FALSE;
+    api = &disp->apiHeadState[apiHead];
+    if (nvPopCount32(api->hwHeadsMask) != 1 ||
+        nvCountDpyIdsInDpyIdList(api->activeDpys) != 1 ||
+        !nvDpyIdIsInDpyIdList(dpy->id, api->activeDpys))
+        return FALSE;
+    hw = &disp->headState[nvGetPrimaryHwHead(disp, apiHead)];
+    return hw->pConnectorEvo == dpy->pConnectorEvo &&
+        hw->pixelDepth == NVKMS_PIXEL_DEPTH_20_422 &&
+        hw->tf == NVKMS_OUTPUT_TF_NONE && !hw->hdrInfoFrameOverride.enabled &&
+        api->attributes.color.format == NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_SPACE_YCbCr422 &&
+        api->attributes.color.bpc == 10 &&
+        api->attributes.color.range == NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_LIMITED &&
+        api->attributes.color.colorimetry == NVKMS_OUTPUT_COLORIMETRY_BT2100 &&
+        api->tf == NVKMS_OUTPUT_TF_NONE && !api->hdrInfoFrameOverride &&
+        !api->hdrStaticMetadataLayerMask &&
+        nvDoviLowLatency(api->hdmiVsifMetadata.payload, api->hdmiVsifMetadata.payloadSize) &&
+        nvDoviLowLatency(hw->hdmiVsifMetadata.payload, hw->hdmiVsifMetadata.payloadSize);
+}
 
 /*!
  * Get the NVDpyEvoRec described by NvKmsPerOpen + deviceHandle +
@@ -5152,6 +5193,18 @@ NvBool nvKmsIoctl(
     }
 
     /* Keep every existing R580 userspace command and its wire layout intact. */
+    if (cmdOpaque == NVKMS_IOCTL_KAPI_NATIVE_LLDV_422) {
+        struct NvKmsKapiNativeLldv422 *p = (void *)(NvUPtr)paramsAddress;
+        const NVDpyEvoRec *dpy;
+        if (pOpen->clientType != NVKMS_CLIENT_KERNEL_SPACE ||
+            paramSize != sizeof(*p) || !p) return FALSE;
+        dpy = GetPerOpenDpy(pOpen, p->deviceHandle, p->dispHandle,
+                            nvNvU32ToDpyId(p->display));
+        if (!dpy) return FALSE;
+        p->supported = Cb1NativeLldv422(dpy);
+        p->active = p->supported && Cb1NativeLldvActive(dpy, p->head);
+        return TRUE;
+    }
     if (cmdOpaque == NVKMS_IOCTL_KAPI_HDR10PLUS_STATUS) {
         struct NvKmsKapiHdr10plusStatus *p = (void *)(NvUPtr)paramsAddress;
         struct NvKmsPerOpenDev *dev;

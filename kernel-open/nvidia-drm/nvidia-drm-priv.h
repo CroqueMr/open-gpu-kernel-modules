@@ -93,6 +93,8 @@ struct nv_drm_device {
     struct drm_property *cb1_hdr10plus_status_property;
     struct drm_property *cb1_deep_color_property;
     struct drm_property *cb1_lldv_format_property;
+    struct drm_property *cb1_native_lldv_422_property;
+    struct drm_property *cb1_native_lldv_active_property;
     nv_gpu_info_t gpu_info;
     MIGDeviceId gpu_mig_device;
 
