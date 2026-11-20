@@ -577,6 +577,15 @@ static void SendVideoInfoFrame(const NVDispEvoRec *pDispEvo,
     NVT_STATUS status;
 
     CalculateVideoInfoFrameColorFormat(pDpyColor, hdTimings, pEdidInfo, &videoCtrl);
+    const NvBool lowLatency = nvDoviLowLatency(
+        pDispEvo->headState[head].hdmiVsifMetadata.payload,
+        pDispEvo->headState[head].hdmiVsifMetadata.payloadSize);
+    if (lowLatency) {
+        videoCtrl.color_space = NVT_VIDEO_INFOFRAME_BYTE1_Y1Y0_YCbCr422;
+        videoCtrl.colorimetry = NVT_VIDEO_INFOFRAME_BYTE2_C1C0_EXT_COLORIMETRY;
+        videoCtrl.extended_colorimetry = NVT_VIDEO_INFOFRAME_BYTE3_EC_BT2020RGBYCC;
+        videoCtrl.rgb_quantization_range = NVT_VIDEO_INFOFRAME_BYTE3_Q1Q0_DEFAULT;
+    }
 
     if (nvDoviLegacy(pDispEvo->headState[head].hdmiVsifMetadata.payload,
                      pDispEvo->headState[head].hdmiVsifMetadata.payloadSize) &&
@@ -593,6 +602,9 @@ static void SendVideoInfoFrame(const NVDispEvoRec *pDispEvo,
                           "Error in constructing Video InfoFrame");
         return;
     }
+    if (lowLatency)
+        VideoInfoFrame.byte5 &= ~NVT_VIDEO_INFOFRAME_BYTE5_YQ1YQ0_MASK;
+
 
     pDevEvo->hal->SendHdmiInfoFrame(
         pDispEvo,

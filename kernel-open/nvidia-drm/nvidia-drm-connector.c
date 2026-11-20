@@ -45,6 +45,12 @@
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_edid.h>
+#include <drm/drm_blend.h>
+#include <drm/drm_dvbridge_edid.h>
+#include <drm/drm_framebuffer.h>
+#include <linux/moduleparam.h>
+#include "nvkms-dv-vsif.h"
+
 
 static bool nv_drm_connector_hdmi_properties(const struct nv_drm_connector *c)
 {
@@ -276,6 +282,7 @@ static struct drm_connector_state *nv_cb1_duplicate_state(struct drm_connector *
     s->vsif = drm_property_blob_get(nv_cb1_state(c->state)->vsif);
     s->dither_off = nv_cb1_state(c->state)->dither_off;
     s->strict_deep_color = nv_cb1_state(c->state)->strict_deep_color;
+    s->lldv_format = nv_cb1_state(c->state)->lldv_format;
     return &s->base;
 }
 
@@ -284,10 +291,16 @@ static int nv_cb1_set_property(struct drm_connector *c, struct drm_connector_sta
 {
     struct nv_drm_device *d = to_nv_device(c->dev);
     struct nv_cb1_connector_state *ns = nv_cb1_state(s);
+    if (p == d->cb1_lldv_format_property) {
+        if (val > 1) return -EINVAL;
+        ns->lldv_format = val;
+        return 0;
+    }
     if (p == d->cb1_vsif_property) {
         struct drm_property_blob *blob = val ? drm_property_lookup_blob(c->dev, val) : NULL;
         if (val && !blob) return -EINVAL;
-        if (blob && (blob->length < 3 || blob->length > 27)) {
+        if (blob && (blob->length < 3 || blob->length > 27 ||
+                     nvDoviLowLatency(blob->data, blob->length))) {
             drm_property_blob_put(blob);
             return -EINVAL;
         }
@@ -350,7 +363,8 @@ static int nv_cb1_get_property(struct drm_connector *c, const struct drm_connect
         *val = nv_drm_connector_current_output_bpc(c, s);
         return 0;
     }
-    if (p == d->cb1_vsif_property) *val = ns->vsif ? ns->vsif->base.id : 0;
+    if (p == d->cb1_lldv_format_property) *val = ns->lldv_format;
+    else if (p == d->cb1_vsif_property) *val = ns->vsif ? ns->vsif->base.id : 0;
     else if (p == d->cb1_dither_property) *val = ns->dither_off;
     else return -EINVAL;
     return 0;
@@ -489,6 +503,53 @@ static const NvU32 __nv_drm_connector_supported_colorspaces =
 #endif
 
 #if defined(NV_DRM_CONNECTOR_ATTACH_HDR_OUTPUT_METADATA_PROPERTY_PRESENT)
+static bool nv_drm_lldv_enabled;
+module_param_named(enable_lldv_lab, nv_drm_lldv_enabled, bool, 0444);
+MODULE_PARM_DESC(enable_lldv_lab, "Expose experimental player-led YCbCr 4:2:2 on native HDMI");
+
+static bool nv_drm_lldv_supported(struct drm_connector *connector,
+                                  const struct drm_connector_state *conn,
+                                  struct drm_crtc *crtc,
+                                  const struct drm_crtc_state *state,
+                                  nv_drm_atomic_state_base_t *commit)
+{
+    const struct nv_drm_connector *nv_connector = to_nv_connector(connector);
+    const struct drm_edid *edid = nv_connector->edid;
+    const struct drm_display_mode *mode = &state->mode;
+    const unsigned int vic = drm_match_cea_mode(mode);
+    struct dvbridge_sink_caps caps;
+    const struct drm_plane_state *plane =
+        drm_atomic_get_new_plane_state(commit, crtc->primary);
+
+    if (!plane)
+        plane = crtc->primary->state;
+    if (!nv_drm_lldv_enabled || !edid ||
+        nv_connector->type != NVKMS_CONNECTOR_TYPE_HDMI ||
+        connector->status != connector_status_connected ||
+        !connector->display_info.is_hdmi || !connector->display_info.has_hdmi_infoframe ||
+        !state->active || state->vrr_enabled || state->async_flip || commit->async_update ||
+        state->connector_mask != drm_connector_mask(connector) ||
+        state->plane_mask != drm_plane_mask(crtc->primary) ||
+        state->ctm || state->gamma_lut || state->degamma_lut ||
+        conn->hdr_output_metadata || conn->hdr10plus_metadata ||
+        conn->max_requested_bpc != 8 || conn->colorspace ||
+        vic < 93 || vic > 95 ||
+        (mode->clock != 297000 && (mode->clock != 296703 || vic == 94)) ||
+        !plane || !plane->fb || plane->crtc != crtc ||
+        (plane->fb->format->format != DRM_FORMAT_XRGB8888 &&
+         plane->fb->format->format != DRM_FORMAT_ARGB8888) ||
+        plane->fb->width != 3840 || plane->fb->height != 2160 ||
+        plane->src_x || plane->src_y || plane->src_w != 3840U << 16 ||
+        plane->src_h != 2160U << 16 || plane->crtc_x || plane->crtc_y ||
+        plane->crtc_w != 3840 || plane->crtc_h != 2160 ||
+        plane->rotation != DRM_MODE_ROTATE_0 || plane->alpha != DRM_BLEND_ALPHA_OPAQUE ||
+        plane->color_pipeline)
+        return false;
+
+    caps = dvbridge_parse_edid((const u8 *)drm_edid_raw(edid), drm_edid_size(edid));
+    return dvbridge_lldv_422(caps) && !caps.legacy_vsif;
+}
+
 static int
 __nv_drm_connector_atomic_check(struct drm_connector *connector,
                                 nv_drm_atomic_state_base_t *state)
@@ -507,6 +568,7 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
     if (drm_connector_check_hdr10plus(new_connector_state)) return -EINVAL;
 
     if (!crtc) {
+        nv_cb1_state(new_connector_state)->lldv_format = 0;
         return 0;
     }
 
@@ -524,7 +586,13 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
         struct NvKmsCb1Vsif next = {0};
         NvU32 bpc = 0;
         bool strict = ns->strict_deep_color || new_connector_state->hdr10plus_metadata;
-        if (ns->vsif) {
+        if (ns->lldv_format) {
+            if (ns->vsif || ns->strict_deep_color || !ns->dither_off ||
+                !nv_drm_lldv_supported(connector, new_connector_state, crtc, crtc_state, state))
+                return -EINVAL;
+            next.payloadSize = sizeof(nvDoviLowLatencyPayload);
+            memcpy(next.payload, nvDoviLowLatencyPayload, next.payloadSize);
+        } else if (ns->vsif) {
             next.payloadSize = ns->vsif->length;
             memcpy(next.payload, ns->vsif->data, next.payloadSize);
         }
@@ -719,6 +787,10 @@ nv_drm_connector_new(struct drm_device *dev,
             nv_dev->cb1_bpc_property, 12);
         drm_object_attach_property(&nv_connector->base.base,
             nv_dev->cb1_vsif_property, 0);
+        if (nv_drm_lldv_enabled && nv_connector->type == NVKMS_CONNECTOR_TYPE_HDMI &&
+            nv_dev->cb1_lldv_format_property)
+            drm_object_attach_property(&nv_connector->base.base,
+                                       nv_dev->cb1_lldv_format_property, 0);
         drm_object_attach_property(&nv_connector->base.base,
             nv_dev->cb1_dither_property, 0);
 #if defined(NV_DRM_MODE_CREATE_DP_COLORSPACE_PROPERTY_HAS_SUPPORTED_COLORSPACES_ARG)
